@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+================================================================================
+  MiSTer MRA (Multi-ROM Archive) Template for Arcade-DECOCassette
+================================================================================
+
+  This template documents the ROM region layout, metadata block format, and
+  how to assemble a complete MRA for a DECOCassette game.
+
+  BIBLE: MAME source files
+  - decocass.cpp           : ROM table definitions (lines ~1300–1900)
+  - decocass_m.cpp         : dongle type initialization and game-specific tables
+  - decocass_tape.cpp      : cassette protocol
+  - rtl/dongle/*.v         : dongle type implementation (game_id selection)
+
+================================================================================
+  ROM REGION MAP (locked in rtl/rom/rom_loader.v)
+================================================================================
+
+  Address Range      Size    Purpose
+  ───────────────────────────────────────────────────────────────────
+  $00000–$00FFF    (4 KB)   Main 6502 BIOS (cassmain.c7 or v0a-.7e)
+  $01000–$017FF    (2 KB)   Audio 6502 BIOS (v3-1-2.c4)
+  $01800–$01BFF    (1 KB)   MCU ROM (cassmcu1.cpu)
+  $01C00–$01CFF    (256 B)  Palette PROM (v1.j7) — 32B PROM padded to 256B
+  $01D00–$01DFF    (256 B)  Dongle PROM (game-specific, varies per type)
+  $01E00–$01EFF    (256 B)  Type-1 swap PROM (only for Type 1 dongles)
+  $01F00–$01FFF    (256 B)  Metadata block (constructed by MRA, NOT from ROM)
+  $02000–$3FFFF    (≤248KB) Cassette image (from MAME "cassette" region)
+
+================================================================================
+  METADATA BLOCK FORMAT ($01F00–$01FFF)
+================================================================================
+
+  Byte 0: dongle_type
+      0x00 = No dongle (dongle_nodong.v)
+      0x01 = Type 1 (dongle_type1.v) — bit permutation + optional PROM lookup
+      0x02 = Type 2 (dongle_type2.v) — 12-bit counter
+      0x03 = Type 3 (dongle_type3.v) — 12-bit counter + bit-swap PROM
+      0x04 = Type 4 (dongle_type4.v) — 13-bit counter
+      0x05 = Type 5 (dongle_type5.v) — expander
+      0x06 = No dongle (alternate encoding)
+
+  Byte 1: game_id (for Type 1 dongles only)
+      Values 0x0–0xF select per-game bit-permutation map in dongle_type1.v.
+      For other dongle types, set to 0x00 (unused).
+
+      Type 1 game_id mappings (from dongle_type1.v line 82–250):
+      0x00 = ctsttape    (identity maps)
+      0x01 = cnebula     (identity maps)
+      0x02 = chwy        (identity maps)
+      0x03 = cdsteljn    (identity maps)
+      0x04 = cterrani    (identity maps)
+      0x05 = castfant    (identity maps)
+      0x06 = csuperas    (swap bits 4↔5)
+      0x07 = cmanhat     (identity maps)
+      0x08 = clocknch    (swap bits 2↔3)  ← Lock'n'Chase
+      0x09 = cprogolf    (swap bits 0↔1)  ← Pro Golf
+      0x0A = cprogolfj   (swap bits 0↔1)
+      0x0B = cluckypo    (swap bits 1↔3)
+      ...and more
+
+  Byte 2: swap_mode (for Type 3 dongles only)
+      Encodes the bit-swap transformation applied by the Type 3 dongle.
+      For Type 3, select from the TYPE3_SWAP_* constants in dongle_type3.v:
+
+      0x00 = TYPE3_SWAP_01   (swap bits 0↔1)
+      0x01 = TYPE3_SWAP_12   (swap bits 1↔2)  ← Burger Time (cbtime)
+      0x02 = TYPE3_SWAP_13   (complex shuffle of bits 1,2,3)
+      0x03 = TYPE3_SWAP_24   (swap bits 2↔4 and 3)
+      0x04 = TYPE3_SWAP_25   (swap bits 2↔5, 4)
+      0x05 = TYPE3_SWAP_34_0 (swap bits 3↔4, d0_latch at [0])
+      0x06 = TYPE3_SWAP_34_7 (swap bits 3↔4, d0_latch at [7])
+      0x07 = TYPE3_SWAP_45   (swap bits 4↔5)
+      0x08 = TYPE3_SWAP_23_56 (swap 2↔3 and 5↔6)
+      0x09 = TYPE3_SWAP_56   (swap bits 5↔6)
+      0x0A = TYPE3_SWAP_67   (swap bits 6↔7)
+
+      For Type 1 and other types, set to 0x00 (unused).
+
+  Bytes 3–255: Reserved / padding (all zeros)
+
+================================================================================
+  HOW TO DETERMINE DONGLE TYPE, GAME_ID, AND SWAP_MODE FOR A NEW GAME
+================================================================================
+
+  STEP 1: Identify dongle type
+  ───────────────────────────
+  Look in decocass_m.cpp for the game's MACHINE_RESET_MEMBER function.
+  It will call one of:
+    - decocass_type1_state::MACHINE_RESET_MEMBER(…clocknch, …cprogolf, etc.)
+      → Dongle type 0x01, game_id selected from Type 1 map
+    - decocass_type3_state::MACHINE_RESET_MEMBER(…cbtime, …cburnrub, etc.)
+      → Dongle type 0x03, swap_mode set from TYPE3_SWAP_* enum
+    - etc.
+
+  STEP 2: For Type 1 — Select game_id
+  ────────────────────────────────────
+  Find the game's MACHINE_RESET_MEMBER in decocass_m.cpp.
+  Example (Lock'n'Chase, line 1518–1525):
+    MACHINE_RESET_MEMBER(decocass_type1_state,clocknch)
+    {
+        machine_reset();
+        LOG(0,("dongle type #1 (DE-0061 flip 2-3)\n"));
+        m_type1_map = type1_latch_26_pass_3_inv_2_table;
+        m_type1_inmap = MAKE_MAP(0,1,3,2,4,5,6,7);  ← swap 2↔3
+        m_type1_outmap = MAKE_MAP(0,1,3,2,4,5,6,7);
+    }
+
+  Then find the corresponding entry in dongle_type1.v (line 82+).
+  For clocknch, it's at line 203–216 with game_id = 0x08.
+
+  STEP 3: For Type 3 — Select swap_mode
+  ──────────────────────────────────────
+  Find the game's MACHINE_RESET_MEMBER in decocass_m.cpp.
+  Example (Burger Time, line 1586–1591):
+    MACHINE_RESET_MEMBER(decocass_type3_state,cbtime)
+    {
+        machine_reset();
+        LOG(0,("dongle type #3 (PAL)\n"));
+        m_type3_swap = TYPE3_SWAP_12;  ← This is the swap_mode value
+    }
+
+  Map TYPE3_SWAP_12 to its index:
+    enum { TYPE3_SWAP_01, TYPE3_SWAP_12, ... } (decocass_m.cpp:39–51)
+  TYPE3_SWAP_12 is the second item (index 1), so swap_mode = 0x01.
+
+================================================================================
+  MRA STRUCTURE: REGION LAYOUT AND PROM LOADING
+================================================================================
+
+  The <rom> element's <part> directives assemble the unified image:
+
+  1. Main BIOS (at $00000): from MAME "maincpu" region
+  2. Audio BIOS (at $01000): from MAME "audiocpu" region
+  3. MCU ROM (at $01800): from MAME "mcu" region
+  4. Palette PROM (at $01C00): from MAME "proms" region + padding
+  5. Dongle PROM (at $01D00): from MAME "dongle" region + padding
+  6. Type-1 Swap PROM (at $01E00): from MAME game-specific type1 PROM (if Type 1)
+  7. Metadata (at $01F00): constructed in-place with <part>XX XX XX</part>
+  8. Cassette (at $02000): from MAME "cassette" region
+
+================================================================================
+  MINIMAL MRA TEMPLATE
+================================================================================
+
+-->
+<misterromdescription>
+    <name>Game Name</name>
+    <setname>mame_short_name</setname>
+    <rbf>Arcade-DECOCassette</rbf>
+    <year>YYYY</year>
+    <manufacturer>Data East</manufacturer>
+    <category>Category</category>
+
+    <rom index="0" zip="decocass.zip|game_short_name.zip" md5="none">
+        <!-- $00000–$00FFF: Main 6502 BIOS (4 KB) -->
+        <!-- Load the newer RMS-8 BIOS (v0a-.7e, v0b-.7e, etc.) or older RMS-3 (dsp-3) -->
+        <!-- Typically v0b-.7e for USA region, v0a-.7e for Japan, etc. -->
+        <part name="v0b-.7e" crc="23d929b7"/>
+
+        <!-- $01000–$017FF: Audio 6502 BIOS (2 KB) -->
+        <!-- Typically v3-1-2.c4 for newer boards, or audio ROM from older boards -->
+        <part name="v3-1-2.c4" crc="62283751"/>
+
+        <!-- $01800–$01BFF: MCU ROM (1 KB) -->
+        <!-- Always cassmcu1.cpu from "mcu" region -->
+        <part name="cassmcu1.cpu" crc="9e5c9c7e"/>
+
+        <!-- $01C00–$01CFF: Palette PROM (256 B, padded to match) -->
+        <!-- Load v1.j7 (32 bytes) from "proms" region, then pad with zeros to 256 B -->
+        <part name="v1.j7" crc="e0b72b6c"/>
+        <part repeat="0xE0">00</part>
+
+        <!-- $01D00–$01DFF: Dongle PROM (256 B, varies per game) -->
+        <!-- This is the game-specific PROM from the MAME "dongle" region -->
+        <!-- For Type 1 dongles: typically 32 bytes, padded to 256 B -->
+        <!-- For Type 3 dongles: typically 256 bytes (1K PROM, use lower 256 B) -->
+        <part name="dp_your_game.pro" crc="12345678"/>
+        <part repeat="0xE0">00</part>
+
+        <!-- $01E00–$01EFF: Type-1 Swap PROM (256 B) — ONLY FOR TYPE 1 DONGLES -->
+        <!-- For Type 3 and other types, omit this section entirely -->
+        <!-- This is the permutation table for Type 1 bit-swapping (usually 32 bytes, padded) -->
+        <part name="type1_swap_prom.pro" crc="abcdef01"/>
+        <part repeat="0xE0">00</part>
+
+        <!-- $01F00–$01FFF: Metadata Block (256 B, constructed in MRA) -->
+        <!-- Byte 0: dongle_type (0x00–0x06)
+             Byte 1: game_id (Type 1 only: 0x00–0x0F; others: 0x00)
+             Byte 2: swap_mode (Type 3 only: 0x00–0x0A; others: 0x00)
+             Bytes 3–255: zeros (padding)
+        -->
+        <part>01 08 00</part>  <!-- Example: Type 1, game_id=0x08 (clocknch), swap_mode=0x00 (unused) -->
+        <part repeat="0xFD">00</part>
+
+        <!-- $02000–: Cassette Image -->
+        <!-- Load the cassette from MAME "cassette" region, no padding -->
+        <part name="your_game.cas"/>
+    </rom>
+
+    <!-- Standard button mapping for DECOCassette arcade -->
+    <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
+</misterromdescription>
+
+<!--
+================================================================================
+  NOTES ON CRC32 VALUES
+================================================================================
+
+  You don't need exact CRC32s while developing. When md5="none" is used in the
+  <rom> tag, hps_io will load ROMs by name matching alone. If you need strict
+  CRC verification later, consult MAME's decocass.cpp ROM table and fill in
+  the actual values.
+
+  To extract CRC32 from a MAME ROM file:
+    python -c "import zlib; print(hex(zlib.crc32(open('filename', 'rb').read()) & 0xffffffff))"
+
+================================================================================
+  DEBUGGING TIPS
+================================================================================
+
+  1. Verify dongle_type and metadata against rtl/dongle/dongle_mux.v selector.
+  2. For Type 1: check game_id against dongle_type1.v (lines 82–250).
+  3. For Type 3: check swap_mode against the enum in decocass_m.cpp (lines 39–51).
+  4. Cassette must be a raw *.cas file from MAME; no padding needed.
+  5. ROM names must match MAME's ROM labels exactly (case-sensitive in some contexts).
+
+================================================================================
+-->

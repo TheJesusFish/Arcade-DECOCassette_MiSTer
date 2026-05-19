@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Burger Time (cbtime) — Type 3 Dongle (PAL), version 7-B-0
+
+  MAME ROM references (verified from decocass.cpp):
+  - Main BIOS:   v0b-.7e         (4 KB)   CRC 23d929b7  @ 0xf000
+  - Audio BIOS:  v1-.5a          (2 KB)   CRC b66b2c2a  @ 0xf800
+  - MCU:         cassmcu.1c      (1 KB)   CRC a6df18fd
+  - PROMs:       v2.3m + v4.10d + v3.3j  (32 B each, 96 B total)
+  - Dongle:      dp-126_b.dgl    (4 KB)   CRC 25bec0f0  ← full 4 KB now loaded
+  - Cassette:    dt-126_7b.cas   (32 KB)  CRC 56d7dc58
+
+  Dongle config:
+  - dongle_type = 0x03 (Type 3 / PAL)
+  - game_id     = 0x00 (unused for Type 3)
+  - swap_mode   = 0x01 (TYPE3_SWAP_12 — swap bits 1↔2; from decocass_m.cpp:1590)
+
+  Region map (matches rom_loader.v):
+    $00000-$00FFF main BIOS (4 KB)
+    $01000-$017FF audio BIOS (2 KB)
+    $01800-$01BFF MCU ROM (1 KB)
+    $01C00-$01CFF palette PROMs (256 B)
+    $01D00-$02CFF dongle PROM (4 KB)
+    $02D00-$02DFF spare (256 B)
+    $02E00-$02EFF metadata (256 B)
+    $02F00-$02FFF reserved (256 B)
+    $03000+       cassette
+-->
+<misterromdescription>
+    <name>Burger Time</name>
+    <setname>cbtime</setname>
+    <rbf>DECOCassette</rbf>
+    <year>1982</year>
+    <manufacturer>Data East</manufacturer>
+    <category>Platformer</category>
+
+    <rom index="0" zip="decocass.zip|cbtime.zip" md5="none">
+        <!-- $00000-$00FFF: Main 6502 BIOS -->
+        <part name="v0b-.7e" crc="23d929b7"/>
+
+        <!-- $01000-$017FF: Audio 6502 BIOS -->
+        <part name="v1-.5a" crc="b66b2c2a"/>
+
+        <!-- $01800-$01BFF: MCU ROM -->
+        <part name="cassmcu.1c" crc="a6df18fd"/>
+
+        <!-- $01C00-$01CFF: BIOS PROMs (96 B + 160 B pad) -->
+        <part name="v2.3m"  crc="238fdb40"/>
+        <part name="v4.10d" crc="3b5836b4"/>
+        <part name="v3.3j"  crc="51eef657"/>
+        <part repeat="0xA0">00</part>
+
+        <!-- $01D00-$02CFF: Dongle PROM (full 4 KB) -->
+        <part name="dp-126_b.dgl" crc="25bec0f0"/>
+
+        <!-- $02D00-$02DFF: Spare -->
+        <part repeat="0x100">00</part>
+
+        <!-- $02E00-$02EFF: Metadata (Type 3, game_id=00, swap_mode=01 = TYPE3_SWAP_12) -->
+        <part>03 00 01</part>
+        <part repeat="0xFD">00</part>
+
+        <!-- $02F00-$02FFF: Reserved -->
+        <part repeat="0x100">00</part>
+
+        <!-- $03000-: Cassette image -->
+        <part name="dt-126_7b.cas" crc="56d7dc58"/>
+    </rom>
+
+    <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
+</misterromdescription>
