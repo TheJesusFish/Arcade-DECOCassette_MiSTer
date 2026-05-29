@@ -187,15 +187,25 @@ module decocass (
     //------------------------------------------------------------------------
     reg coin_d;
     reg cpu_nmi_req;
+    reg vblank_d;   // DIAG-REVERT-2026-05-29: vblank edge detect for restored vblank-NMI
 
     always @(posedge clk_sys) begin
         if (reset) begin
             coin_d      <= 1'b0;
             cpu_nmi_req <= 1'b0;
+            vblank_d    <= 1'b0;   // DIAG-REVERT-2026-05-29
         end else begin
-            coin_d <= coin_in;
-            // Rising edge of coin_in = coin press = NMI assert.
-            if (coin_in && !coin_d)
+            coin_d   <= coin_in;
+            vblank_d <= vblank;    // DIAG-REVERT-2026-05-29
+            // DIAG-REVERT-2026-05-29: RESTORE vblank-NMI (the prior session removed it,
+            // lines 169-182). Diagnostic shows the main 6502 spins in $Fxxx touching NO
+            // peripherals ($E5xx/$E414/$E700/$E701 all black) -> it's waiting on a
+            // RAM value an interrupt should update, and its only NMI is coin. The
+            // original DECO code NMI'd every vblank (the main loop is vblank-driven, like
+            // Kyugo). Testing coin OR vblank-rising. Revert = restore the coin-only line.
+            // if (coin_in && !coin_d)
+            //     cpu_nmi_req <= 1'b1;
+            if ((coin_in && !coin_d) || (vblank && !vblank_d))
                 cpu_nmi_req <= 1'b1;
             // CPU write to $E417 clears it (decocass_nmi_reset_w).
             else if (cpu_addr_int == 16'hE417 && !cpu_rw_n_int && ce_main)

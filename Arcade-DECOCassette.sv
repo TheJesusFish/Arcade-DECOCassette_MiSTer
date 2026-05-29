@@ -1152,9 +1152,168 @@ video_missiles video_missiles_inst (
 wire [3:0] core_r_hi, core_g_hi, core_b_hi;
 wire [5:0] mixer_pen;
 wire       mixer_modulate;
-wire [7:0] core_r = {core_r_hi, core_r_hi};
-wire [7:0] core_g = {core_g_hi, core_g_hi};
-wire [7:0] core_b = {core_b_hi, core_b_hi};
+// DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   >>> DIAGNOSTIC >>>
+// Mirrors the Kyugo swatch overlay (kyugo_video_audit_2026-05-28). Predecessor's
+// compile-6 showed mixer_pen stuck at 8 (BG_FILL) everywhere -> screen = palette[8].
+// Two unknowns this splits in ONE compile: (1) is the palette RAM actually populated
+// with real colour, or empty/black? (2) does any layer EVER become opaque (renderer
+// produces a pixel)? Bands at top of the (pre-rotation) raster:
+//
+//   vcnt 16..31 : ROW 1 — 8 PROOF-OF-LIFE cells, 32px each. DISTINCT colour if the
+//                 sticky flag is TRUE, else BLACK. These are the "did the CPU get PAST
+//                 the MCU handshake" milestones — once the handshake is fixed they flip on:
+//     0 GREEN   cpu_alive       — deco222 address bus is changing (executing)
+//     1 CYAN    cpu_sync_ever   — CPU fetched at least one opcode (cpu_sync pulsed)
+//     2 BLUE    palram_wr_ever  — BIOS has written palette RAM ($E000-$E0FF)
+//     3 RED     charram_wr_ever — CPU wrote FG char planes (glyph bitmap data)
+//     4 YELLOW  fgvram_wr_ever  — CPU wrote the FG tilemap (which glyph where)
+//     5 MAGENTA mixer_nonfill   — mixer_pen was EVER != 8 (a layer won priority)
+//     6 ORANGE  tape_motor_ever — cassette transport ran (the "USER LED" sign of life)
+//     7 WHITE   calibration     — ALWAYS on (proves overlay renders + rbf is fresh +
+//                                 pause->arcade_video->scaler output path is alive)
+//   vcnt 32..47 : ROW 2 — 8 SOUND-HANDSHAKE cells (main<->audio 6502; the suspected stall;
+//                 see the row-2 colour legend at the cell2_* block below). DECO twin of
+//                 Kyugo's row-2 coprocessor probe.
+//   vcnt 48..79 : CPU BUS BAR — RGB straight from cpu_addr/cpu_dout. Moving stipple =
+//                 CPU executing across addresses; a frozen solid block = stuck/halted.
+//   vcnt 80..207: PALETTE SWATCH — 8x4 grid, palette read index forced to the cell
+//                 index 0..31, shown through the NORMAL palette path. Real colours =
+//                 palette RAM populated; all-black = palette empty (the Kyugo bug
+//                 class). Cell 8 (row 1, col 0) is pen 8 = BG_FILL = the whole-screen
+//                 colour when the mixer is stuck — if cell 8 is black the bg fill
+//                 itself is unwritten.
+//   vcnt 208..247: untouched normal game render.
+//
+// READING IT: cell7 white but cell0 black -> CPU halted (root). cell0 green but cell2
+//   black -> BIOS never wrote palette -> swatch black -> palette empty. cell2 green
+//   but swatch still all-black -> palette write/decode path broken (look at the XOR /
+//   invert in video_palette.v). swatch colourful but cell5 black -> palette fine, no
+//   layer ever opaque -> renderer never emits a pixel (FG transparent everywhere:
+//   prefetch / opaque-flag bug). swatch colourful + cell5 green + game band still
+//   black -> mixing/priority bug downstream.
+//
+// REVERT: delete this whole block, restore .pen(mixer_pen) on video_palette_inst, and
+// uncomment the 3 original core_r/g/b assigns just below.
+//========================================================================
+reg cpu_sync_ever, palram_wr_ever, charram_wr_ever, fgvram_wr_ever;
+reg mixer_nonfill_ever, tape_motor_ever;
+reg [15:0] diag_a_prev;
+reg [19:0] diag_alive_cnt;
+// Row-2 (main<->audio-CPU SOUND handshake) sticky probes — the suspected stall site.
+reg e414_we_ever, e701_rd_ever, e700_rd_ever, a000_re_ever, c000_we_ever, airq_ever;
+reg [7:0]  audio_a_prev;
+reg [19:0] audio_alive_cnt;
+always @(posedge clk_sys) begin
+    if (reset) begin
+        cpu_sync_ever <= 1'b0; palram_wr_ever <= 1'b0; charram_wr_ever <= 1'b0;
+        fgvram_wr_ever <= 1'b0; mixer_nonfill_ever <= 1'b0; tape_motor_ever <= 1'b0;
+        diag_a_prev <= 16'd0; diag_alive_cnt <= 20'd0;
+        e414_we_ever <= 1'b0; e701_rd_ever <= 1'b0; e700_rd_ever <= 1'b0;
+        a000_re_ever <= 1'b0; c000_we_ever <= 1'b0; airq_ever <= 1'b0;
+        audio_a_prev <= 8'd0; audio_alive_cnt <= 20'd0;
+    end else begin
+        if (cpu_sync)            cpu_sync_ever      <= 1'b1;
+        if (cpu_we_palram)       palram_wr_ever     <= 1'b1;
+        if (charram_we_any)      charram_wr_ever    <= 1'b1;
+        if (cpu_we_fgvram)       fgvram_wr_ever     <= 1'b1;
+        if (mixer_pen != 6'd8)   mixer_nonfill_ever <= 1'b1;
+        if (tape_motor_on)       tape_motor_ever    <= 1'b1;
+        diag_a_prev <= cpu_addr;
+        if (cpu_addr != diag_a_prev)      diag_alive_cnt <= 20'hFFFFF;
+        else if (diag_alive_cnt != 20'd0) diag_alive_cnt <= diag_alive_cnt - 20'd1;
+        // Row 2 — main<->audio-CPU sound handshake ($E414 / $E700 / $E701 / $A000 / $C000)
+        if (cpu_we_e414)        e414_we_ever <= 1'b1;  // main sent a sound command
+        if (cpu_re_e701)        e701_rd_ever <= 1'b1;  // main polled the sound-ack (the spin)
+        if (cpu_re_e700)        e700_rd_ever <= 1'b1;  // main read sound data
+        if (audio_from_main_re) a000_re_ever <= 1'b1;  // audio CPU consumed the cmd ($A000 read)
+        if (audio_to_main_we)   c000_we_ever <= 1'b1;  // audio CPU wrote a response ($C000)
+        if (audio_irq)          airq_ever    <= 1'b1;  // sound IRQ to the audio CPU ever asserted
+        audio_a_prev <= audio_cpu_addr;
+        if (audio_cpu_addr != audio_a_prev) audio_alive_cnt <= 20'hFFFFF;
+        else if (audio_alive_cnt != 20'd0)  audio_alive_cnt <= audio_alive_cnt - 20'd1;
+    end
+end
+wire cpu_alive = (diag_alive_cnt != 20'd0);
+wire audio_alive = (audio_alive_cnt != 20'd0);
+
+// Band detection (pre-rotation raster; DECO visible = hcnt 0..255, vcnt 8..247)
+wire diag_status  = (vcnt >= 9'd16) & (vcnt < 9'd32)  & (hcnt < 9'd256);  // row 1 (proof-of-life)
+wire diag_status2 = (vcnt >= 9'd32) & (vcnt < 9'd48)  & (hcnt < 9'd256);  // row 2 (sound handshake)
+wire diag_busbar  = (vcnt >= 9'd48) & (vcnt < 9'd80)  & (hcnt < 9'd256);
+wire diag_swatch = (vcnt >= 9'd80) & (vcnt < 9'd208) & (hcnt < 9'd256);
+
+wire [2:0] diag_cell = hcnt[7:5];                 // 0..7, 32px cells
+wire [2:0] sw_col    = hcnt[7:5];                 // 0..7
+wire [1:0] sw_row    = (vcnt - 9'd80) >> 5;       // 0..3, 32 lines per row
+wire [4:0] diag_swatch_index = {sw_row, sw_col};  // 0..31
+
+// Status cells: distinct saturated colours, BLACK when the flag is false.
+reg [7:0] cell_r, cell_g, cell_b;
+always @(*) begin
+    cell_r = 8'd0; cell_g = 8'd0; cell_b = 8'd0;
+    case (diag_cell)
+        3'd0: if (cpu_alive)          cell_g = 8'hFF;                           // GREEN
+        3'd1: if (cpu_sync_ever)      begin cell_g = 8'hFF; cell_b = 8'hFF; end // CYAN
+        3'd2: if (palram_wr_ever)     cell_b = 8'hFF;                           // BLUE
+        3'd3: if (charram_wr_ever)    cell_r = 8'hFF;                           // RED
+        3'd4: if (fgvram_wr_ever)     begin cell_r = 8'hFF; cell_g = 8'hFF; end // YELLOW
+        3'd5: if (mixer_nonfill_ever) begin cell_r = 8'hFF; cell_b = 8'hFF; end // MAGENTA
+        3'd6: if (tape_motor_ever)    begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE
+        3'd7:                         begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE
+    endcase
+end
+
+// Row 2 — main<->audio-CPU SOUND handshake probe (decocass.v:331 warns the main "may
+// spin on sound handshake" if the ack flag never clears). Same colour key:
+//   0 GREEN   audio_alive  — audio 6502 address bus changing (it's actually running)
+//   1 CYAN    e414_we_ever — main wrote $E414 (sent a sound cmd -> sets ack D7, IRQs audio)
+//   2 BLUE    e701_rd_ever — main read $E701 (polling the sound-ack — THE spin)
+//   3 RED     e700_rd_ever — main read $E700 (sound response data)
+//   4 YELLOW  a000_re_ever — audio read $A000 (CONSUMED the cmd -> should clear ack D7)
+//   5 MAGENTA c000_we_ever — audio wrote $C000 (sent a response -> sets ack D6)
+//   6 ORANGE  airq_ever    — the sound IRQ to the audio CPU ever asserted
+//   7 WHITE   calibration
+// READ: cell0 black -> audio CPU dead (root). cell1 black -> main never sent a sound cmd
+//   => the spin is NOT the sound handshake (look at $E300/$E6xx/RAM). cell1+cell6 green
+//   but cell4 BLACK -> main sent cmd + IRQ fired, audio NEVER serviced it ($A000) -> ack
+//   D7 never clears -> main spins (THE bug; fix audio IRQ enable/handler). cell4 green
+//   but row-1 still black -> audio consumes but our $E701 ack-bit polarity is wrong.
+reg [7:0] cell2_r, cell2_g, cell2_b;
+always @(*) begin
+    cell2_r = 8'd0; cell2_g = 8'd0; cell2_b = 8'd0;
+    case (diag_cell)
+        3'd0: if (audio_alive)  cell2_g = 8'hFF;                            // GREEN
+        3'd1: if (e414_we_ever) begin cell2_g = 8'hFF; cell2_b = 8'hFF; end // CYAN
+        3'd2: if (e701_rd_ever) cell2_b = 8'hFF;                            // BLUE
+        3'd3: if (e700_rd_ever) cell2_r = 8'hFF;                            // RED
+        3'd4: if (a000_re_ever) begin cell2_r = 8'hFF; cell2_g = 8'hFF; end // YELLOW
+        3'd5: if (c000_we_ever) begin cell2_r = 8'hFF; cell2_b = 8'hFF; end // MAGENTA
+        3'd6: if (airq_ever)    begin cell2_r = 8'hFF; cell2_g = 8'h80; end // ORANGE
+        3'd7:                   begin cell2_r = 8'hFF; cell2_g = 8'hFF; cell2_b = 8'hFF; end // WHITE
+    endcase
+end
+
+// Direct-colour bands bypass the palette entirely (status cells + CPU bus bar),
+// which doubles as the Kyugo "force-colour" output-path test: if even the WHITE
+// calibration cell is black, the bug is the pause->arcade_video->scaler path, not
+// the palette or renderer.
+wire       diag_direct = diag_status | diag_status2 | diag_busbar;
+wire [7:0] diag_r8 = diag_status ? cell_r : diag_status2 ? cell2_r : cpu_addr[15:8];  // else bus bar
+wire [7:0] diag_g8 = diag_status ? cell_g : diag_status2 ? cell2_g : cpu_addr[7:0];
+wire [7:0] diag_b8 = diag_status ? cell_b : diag_status2 ? cell2_b : cpu_dout;
+
+// Palette read index: forced to the swatch index inside the swatch band.
+wire [5:0] diag_pen = diag_swatch ? {1'b0, diag_swatch_index} : mixer_pen;
+
+// DIAG-REVERT-2026-05-29: original 3 core RGB assigns below, uncomment to restore
+// wire [7:0] core_r = {core_r_hi, core_r_hi};
+// wire [7:0] core_g = {core_g_hi, core_g_hi};
+// wire [7:0] core_b = {core_b_hi, core_b_hi};
+wire [7:0] core_r = diag_direct ? diag_r8 : {core_r_hi, core_r_hi};
+wire [7:0] core_g = diag_direct ? diag_g8 : {core_g_hi, core_g_hi};
+wire [7:0] core_b = diag_direct ? diag_b8 : {core_b_hi, core_b_hi};
+// DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   <<< END DIAGNOSTIC <<<
+//========================================================================
 
 // Palette lookup (task 11)
 //
@@ -1179,7 +1338,9 @@ video_palette video_palette_inst (
 	.cpu_we       (cpu_we_palram),
 	.cpu_addr     ({3'b000, cpu_addr[4:0] ^ 5'b10000}),
 	.cpu_dout     (cpu_dout),
-	.pen          (mixer_pen),
+	// DIAG-REVERT-2026-05-29: original below, restore to revert the palette swatch
+	// .pen          (mixer_pen),
+	.pen          (diag_pen),
 	.prom_index   (5'h00),
 	.red          (core_r_hi),
 	.grn          (core_g_hi),
