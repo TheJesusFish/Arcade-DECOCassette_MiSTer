@@ -203,9 +203,14 @@ module decocass (
             // RAM value an interrupt should update, and its only NMI is coin. The
             // original DECO code NMI'd every vblank (the main loop is vblank-driven, like
             // Kyugo). Testing coin OR vblank-rising. Revert = restore the coin-only line.
-            // if (coin_in && !coin_d)
-            //     cpu_nmi_req <= 1'b1;
-            if ((coin_in && !coin_d) || (vblank && !vblank_d))
+            // AUDIT-2026-05-30: REVERTED the restored vblank-NMI back to coin-only. MAME proof:
+            // DECO main CPU NMI is coin-ONLY (decocass_m.cpp:158), has NO IRQ, and NO vblank
+            // interrupt — the BIOS POLLS vblank via DSW1[7]/$E300 (decocass.cpp:214, already wired
+            // in cpu_din_mux ~line 454). "vblank-driven like Kyugo" is disproven; the vblank-NMI is
+            // the phantom-NMI pitfall ([[Wrong interrupt line stalls boot]]) — hammers BIOS at 60Hz.
+            // Restore the vblank test = `|| (vblank && !vblank_d)` below.
+            if (coin_in && !coin_d)
+            // if ((coin_in && !coin_d) || (vblank && !vblank_d))
                 cpu_nmi_req <= 1'b1;
             // CPU write to $E417 clears it (decocass_nmi_reset_w).
             else if (cpu_addr_int == 16'hE417 && !cpu_rw_n_int && ce_main)

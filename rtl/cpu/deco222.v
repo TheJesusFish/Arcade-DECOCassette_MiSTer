@@ -1,10 +1,10 @@
 // DECO-222 wrapper around T65 6502 core
-// Implements opcode fetch data-bus encryption: D1 and D6 are swapped
+// Implements opcode fetch data-bus encryption: D5 and D6 are swapped
 // on M1/sync cycles only. Data fetches and write cycles pass through unmodified.
 //
 // Reference: MAME src/devices/cpu/m6502/deco222.cpp
-//   bswap = ((byte & 0xBD) | ((byte & 0x40) >> 5) | ((byte & 0x02) << 5))
-//   i.e. swap bits D1 and D6
+//   bswap = ((byte & 0x9F) | ((byte & 0x40) >> 1) | ((byte & 0x20) << 1))
+//   i.e. swap bits D5 and D6  (corrected 2026-05-30 — was wrongly D1<->D6)
 
 module deco222 (
     input  wire        clk_sys,
@@ -24,10 +24,15 @@ module deco222 (
 
     wire [7:0] di_eff;
 
-    // D1/D6 swap, only on opcode fetch (sync=1)
-    // Reconstructed from MAME formula: keeps bits {7,5,4,3,2,0}, swaps bits {1,6}
+    // AUDIT-2026-05-30 ROOT-CAUSE FIX: DECO-222 swaps D5<->D6 on opcode fetch, NOT D1<->D6.
+    // The old D1<->D6 swap was WRONG (predecessor mis-transcribed MAME): it turned the BIOS
+    // reset entry $F053 (raw 38 B8 C2 FF 9A) into SEC/CLV/illegal garbage, and $F615 raw $DD
+    // into illegal $9F (CPU jammed there = the black-screen hang). Correct D5<->D6 yields
+    // $F053 -> CLI/CLD/LDX #$FF/TXS (textbook reset) and $DD -> $BD (LDA abs,X). Verified vs the
+    // ROM bytes. MAME formula: (b & 0x9F) | ((b&0x40)>>1) | ((b&0x20)<<1).
+    // OLD (D1<->D6, wrong): assign di_eff = sync ? { di[7], di[1], di[5:2], di[6], di[0] } : di;
     assign di_eff = sync
-        ? { di[7], di[1], di[5:2], di[6], di[0] }
+        ? { di[7], di[5], di[6], di[4:0] }   // swap D5<->D6 on opcode fetch
         : di;
 
     // Instantiate T65 6502 core

@@ -1293,14 +1293,40 @@ always @(*) begin
     endcase
 end
 
+// DIAG-2026-05-30 (PC-LATCH PROBE): capture the address the early spin loop POLLS.
+// In a stuck "LDA $XXXX / Bxx" loop, latch cpu_addr on any non-ROM DATA READ ($XXXX < $F000)
+// → last_rd settles to the polled peripheral/RAM address. Then disasm $Fxxx around it.
+// Shown in the BUS BAR band (vcnt 48..79, repurposed — it already proved "tight loop"):
+// 16 bit-cells, MSB at the LEFT. Cells 0..7 = HIGH byte (CYAN), cells 8..15 = LOW byte (YELLOW),
+// lit = 1. Read as two hex bytes: e.g. cyan 1110_0101 + yellow 0000_0010 = $E502.
+reg [15:0] last_rd;
+always @(posedge clk_sys) begin
+    if (reset)                                               last_rd <= 16'd0;
+    else if (ce_hclk4 && cpu_rw_n && (cpu_addr < 16'hF000))  last_rd <= cpu_addr;
+end
+wire [3:0] lrd_cell = hcnt[7:4];                  // 0..15 across the 256px band
+wire       lrd_bit  = last_rd[4'd15 - lrd_cell];  // MSB (bit15) at the left
+reg [7:0] lrd_r, lrd_g, lrd_b;
+// DIM-GRID 2026-05-30: every one of the 16 cells is shown DIM (you can't count black cells),
+// the actual bits are FULL bright. Dim shade alternates per nibble (cells 0-3 / 4-7 / 8-11 /
+// 12-15) so you can read it as 4 hex digits. Left 8 = CYAN high byte, right 8 = YELLOW low byte.
+wire [7:0] lrd_lvl = lrd_bit ? 8'hFF : (lrd_cell[2] ? 8'h30 : 8'h10);  // lit=full, else dim (nibble-alt)
+always @(*) begin
+    lrd_r = 8'd0; lrd_g = 8'd0; lrd_b = 8'd0;
+    if (lrd_cell < 4'd8) begin lrd_g = lrd_lvl; lrd_b = lrd_lvl; end // CYAN  = high byte [15:8]
+    else                 begin lrd_r = lrd_lvl; lrd_g = lrd_lvl; end // YELLOW = low byte  [7:0]
+end
+
 // Direct-colour bands bypass the palette entirely (status cells + CPU bus bar),
 // which doubles as the Kyugo "force-colour" output-path test: if even the WHITE
 // calibration cell is black, the bug is the pause->arcade_video->scaler path, not
 // the palette or renderer.
 wire       diag_direct = diag_status | diag_status2 | diag_busbar;
-wire [7:0] diag_r8 = diag_status ? cell_r : diag_status2 ? cell2_r : cpu_addr[15:8];  // else bus bar
-wire [7:0] diag_g8 = diag_status ? cell_g : diag_status2 ? cell2_g : cpu_addr[7:0];
-wire [7:0] diag_b8 = diag_status ? cell_b : diag_status2 ? cell2_b : cpu_dout;
+// DIAG-2026-05-30: bus-bar band (else) now shows the LATCHED POLLED ADDRESS (last_rd) as
+// 16 bit-cells (was raw cpu_addr/cpu_dout). Restore = put cpu_addr[15:8]/[7:0]/cpu_dout back.
+wire [7:0] diag_r8 = diag_status ? cell_r : diag_status2 ? cell2_r : lrd_r;
+wire [7:0] diag_g8 = diag_status ? cell_g : diag_status2 ? cell2_g : lrd_g;
+wire [7:0] diag_b8 = diag_status ? cell_b : diag_status2 ? cell2_b : lrd_b;
 
 // Palette read index: forced to the swatch index inside the swatch band.
 wire [5:0] diag_pen = diag_swatch ? {1'b0, diag_swatch_index} : mixer_pen;
@@ -1309,9 +1335,11 @@ wire [5:0] diag_pen = diag_swatch ? {1'b0, diag_swatch_index} : mixer_pen;
 // wire [7:0] core_r = {core_r_hi, core_r_hi};
 // wire [7:0] core_g = {core_g_hi, core_g_hi};
 // wire [7:0] core_b = {core_b_hi, core_b_hi};
-wire [7:0] core_r = diag_direct ? diag_r8 : {core_r_hi, core_r_hi};
-wire [7:0] core_g = diag_direct ? diag_g8 : {core_g_hi, core_g_hi};
-wire [7:0] core_b = diag_direct ? diag_b8 : {core_b_hi, core_b_hi};
+// DIAG OFF 2026-05-30 — overlay disabled to view the clean boot logo (the decrypt fix worked).
+// Re-arm: restore `diag_direct ? diag_r8/g8/b8 :` and `.pen(diag_pen)` below.
+wire [7:0] core_r = {core_r_hi, core_r_hi};
+wire [7:0] core_g = {core_g_hi, core_g_hi};
+wire [7:0] core_b = {core_b_hi, core_b_hi};
 // DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   <<< END DIAGNOSTIC <<<
 //========================================================================
 
