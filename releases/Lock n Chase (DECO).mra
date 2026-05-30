@@ -52,8 +52,8 @@
         <!-- $02D00-$02DFF: Spare -->
         <part repeat="0x100">00</part>
 
-        <!-- $02E00-$02EFF: Metadata (dongle_type=01, game_id=08, swap_mode=00) -->
-        <part>01 08 00</part>
+        <!-- $02E00-$02EFF: Metadata (dongle_type=01, game_id=0B = DECO release 11, swap_mode=00) -->
+        <part>01 0B 00</part>
         <part repeat="0xFD">00</part>
 
         <!-- $02F00-$02FFF: Reserved -->

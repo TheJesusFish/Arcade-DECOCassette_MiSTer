@@ -113,8 +113,10 @@ module dongle_type3 (
                     end
                 end
                 else begin  // Read from even address (E5x0)
-                    // Latch 8041 D0 bit (line 798)
-                    m_type3_d0_latch <= mcu_status_d0;
+                    // FIX 2026-05-30: MAME line 798 latches `save & 1` = the 8041 DATA byte's bit 0
+                    // (DBBOUT[0]), and only in the pal_19==0 path. Was mcu_status_d0 (wrong bit/source).
+                    if (m_type3_pal_19 == 1'b0)
+                        m_type3_d0_latch <= mcu_dbb_dout[0];
                 end
             end
         end
@@ -148,7 +150,9 @@ module dongle_type3 (
         else begin
             // 8041 status mode: apply bit-swap transformation
             // Bit 0 is always D0 latch in most modes (except SWAP_34_7)
-            prom_data = prom_q;  // Use prom_q as 8041 status data
+            // FIX 2026-05-30: MAME swaps `save = upi41_master_r(0)` = the 8041 DATA byte (DBBOUT),
+            // NOT prom_q. The swap source must be mcu_dbb_dout. (Was prom_q → whole byte wrong.)
+            prom_data = mcu_dbb_dout;
 
             // Decode the swap mode and apply bit permutation
             // (decocass_m.cpp lines 662–795)
@@ -300,10 +304,14 @@ module dongle_type3 (
 
         // 2026-05-18 — 8-bit per MAME decocass_type3_r. Status path returns
         // DBBSTS, data path returns the swapped/PROM byte computed above.
+        // Output mux — MAME decocass_type3_r (dispatcher already gated offset&2==0):
+        //   A0==1: pal_19 ? PROM[ctrs] : 8041-STATUS        A0==0: pal_19 ? open-bus(0xFF) : SWAP(DBBOUT)
         if (cpu_addr_lo[0] == 1'b1) begin
-            cpu_din_full = m_type3_pal_19 ? data_out : mcu_dbb_sts;
+            cpu_din_full = m_type3_pal_19 ? data_out : mcu_dbb_sts;   // data_out==prom_q when pal_19
         end else begin
-            cpu_din_full = m_type3_pal_19 ? data_out : mcu_dbb_dout;
+            // FIX 2026-05-30: A0==0 → 0xFF (open bus) under pal_19, else the SWAPPED DBBOUT byte
+            // (was pal_19?prom_q:raw-DBBOUT — both wrong).
+            cpu_din_full = m_type3_pal_19 ? 8'hFF : data_out;
         end
     end
 

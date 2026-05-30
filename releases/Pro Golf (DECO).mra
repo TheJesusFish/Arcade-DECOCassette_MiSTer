@@ -51,8 +51,8 @@
         <!-- $02D00-$02DFF: Spare -->
         <part repeat="0x100">00</part>
 
-        <!-- $02E00-$02EFF: Metadata (Type 1, game_id=09, swap=00) -->
-        <part>01 09 00</part>
+        <!-- $02E00-$02EFF: Metadata (Type 1, game_id=0D = DECO release 13, swap=00) -->
+        <part>01 0D 00</part>
         <part repeat="0xFD">00</part>
 
         <!-- $02F00-$02FFF: Reserved -->

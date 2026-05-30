@@ -5,24 +5,23 @@
 //  Compute the per-block CRC16 as bytes stream past and write each block's
 //  CRC into a small lookup BRAM.
 //
-//  CRC16 implementation per MAME `decocass_tape.cpp:130-147`
-//  (`tape_crc16_byte`):
+//  CRC16 implementation per MAME `decocass_tape.cpp:136-145` (`tape_crc16_byte`):
 //      for (i = 0; i < 8; i++) {
-//          crc = (crc >> 1) | (crc << 15);             // rotate right
-//          crc ^= (data << 7) & 0x80;                  // bit 0 of data -> bit 7
+//          crc = (crc >> 1) | (crc << 15);   // rotate right
+//          crc ^= (data << 7) & 0x80;        // current data bit -> bit 7
 //          if (crc & 0x80) crc ^= 0x0120;
+//          data >>= 1;                        // <-- ALL 8 bits (was dropped → CRC bug, fixed 2026-05-30)
 //      }
-//  Note this is DECOCassette's non-standard CRC: only bit 0 of each byte
-//  actually contributes.
 //
 //  Each cassette block is 256 data bytes. After every 256 bytes, the running
 //  CRC is stored in `crc_table` and the accumulator is reset.
 //
-//  Simplification vs. MAME: MAME stores a "testval" via brute-force search
-//  (such that crc16(crc16(running_crc, testval>>8), testval) == 0).
-//  We store the raw running CRC instead. If BIOS compares CRC bytes directly,
-//  this works; if BIOS verifies final-CRC = 0, this won't (but no worse than
-//  the previous placeholder=0).
+//  testval == running CRC for this polynomial (VERIFIED: testval(r)=r, i.e.
+//  crc16(crc16(r, r>>8), r) == 0 — the standard CRC residue property). MAME
+//  brute-forces `testval` (decocass_tape.cpp:109-112) but always lands on the
+//  running CRC, so storing the running CRC directly is exactly correct — no
+//  brute-force needed. The BIOS verifies block-CRC == 0; with the data>>=1 fix
+//  above making the CRC correct, that now passes.
 //============================================================================
 
 `timescale 1 ps / 1 ps
@@ -53,19 +52,28 @@ module cassette_loader (
     wire [24:0] cassette_addr_rel = addr - 25'h03000;
     wire is_first_byte = sel_cassette && (cassette_addr_rel == 25'd0);
 
-    // CRC16 step matching MAME `tape_crc16_byte` exactly.
+    // CRC16 step matching MAME `tape_crc16_byte` (decocass_tape.cpp:136-145) exactly.
+    // FIX 2026-05-30: the original omitted MAME's `data >>= 1;` (line 144), so it XORed bit 0
+    // of `d` on all 8 iterations instead of bits 0..7 — i.e. it dropped 7 of every 8 data bits.
+    // That made every block CRC wrong -> CASSETTE ERROR. (The predecessor's "only bit 0
+    // contributes" comment was them missing line 144.) With the shift, the CRC is correct, and
+    // since testval == running-CRC for this polynomial (verified), storing the running CRC below
+    // is exactly MAME's brute-forced testval — no separate testval search needed.
     function [15:0] tape_crc16_byte;
         input [15:0] crc;
         input [7:0]  d;
         integer i;
         reg [15:0] r;
+        reg [7:0]  dd;
         begin
-            r = crc;
+            r  = crc;
+            dd = d;
             for (i = 0; i < 8; i = i + 1) begin
-                r = {r[0], r[15:1]};
-                r = r ^ (d[0] ? 16'h0080 : 16'h0000);
+                r = {r[0], r[15:1]};                    // rotate right: (crc>>1)|(crc<<15)
+                r = r ^ (dd[0] ? 16'h0080 : 16'h0000);  // (data << 7) & 0x80
                 if (r[7])
                     r = r ^ 16'h0120;
+                dd = dd >> 1;                            // MAME line 144 — advance to next data bit
             end
             tape_crc16_byte = r;
         end

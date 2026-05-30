@@ -278,6 +278,7 @@ wire [7:0]  tilram_q_gfx, objram_q_gfx;
 
 // E5xx dongle composite data
 wire [7:0]  e5xx_dongle;
+wire [7:0]  e5xx_to_cpu;   // DONGLE BYPASS FIX 2026-05-30 (assigned near dongle_mux below)
 
 // BIOS ROM interface (CPU side)
 wire [7:0]  bios_dout_cpu;
@@ -373,7 +374,7 @@ always @(posedge clk_sys)
 wire [7:0] dongle_type_byte;
 wire [7:0] game_id_byte;
 wire [7:0] swap_mode_byte;
-wire [3:0] game_id   = game_id_byte[3:0];    // From metadata $02E01 (was sw[0])
+wire [7:0] game_id   = game_id_byte;         // 2026-05-30: full 8-bit = DECO release number (was [3:0])
 wire [3:0] swap_mode = swap_mode_byte[3:0];  // From metadata $02E02 (was sw[1])
 wire [2:0] dongle_type = dongle_type_byte[2:0];
 
@@ -650,7 +651,7 @@ decocass decocass_inst (
 	.cpu_re_e701       (cpu_re_e701),
 	.sound_data        (sound_data),
 	.sound_ack         (sound_ack),
-	.e5xx_dongle_q     (e5xx_dongle),
+	.e5xx_dongle_q     (e5xx_to_cpu),
 	.input_q           (input_q),
 	.bios_q            (bios_q),
 	.ram_q             (ram_q),
@@ -709,6 +710,7 @@ decocass decocass_inst (
 wire [7:0]  mcu_p1_out, mcu_p2_out, mcu_p1_in, mcu_p2_in;
 wire        mcu_t0, mcu_t1;
 wire [7:0]  mcu_host_dout;
+wire [7:0]  mcu_host_sts;       // DBBSTS exposure 2026-05-30: real STATUS reg from the i8041 core
 wire        mcu_host_dout_oe;
 wire        tape_motor_on, tape_direction;
 wire [1:0]  tape_speed_select;
@@ -725,6 +727,7 @@ i8041_top i8041_inst (
 	.a0              (mcu_a0),
 	.host_din        (mcu_host_din),
 	.host_dout       (mcu_host_dout),
+	.host_sts        (mcu_host_sts),       // DBBSTS exposure 2026-05-30
 	.host_dout_oe    (mcu_host_dout_oe),
 	.sync_o          (),
 	.t0_i            (mcu_t0),
@@ -904,7 +907,9 @@ dongle_mux dongle_mux_inst (
 	// 2026-05-18 — dongle reads MCU host-bus registers per MAME
 	// `upi41_master_r(0)/(1)`. mcu_dbb_sts faked as OBF=mcu_host_dout_oe.
 	.mcu_dbb_dout      (mcu_host_dout),
-	.mcu_dbb_sts       ({6'b0, 1'b0 /*IBF unknown*/, mcu_host_dout_oe /*OBF*/}),
+	// DBBSTS exposure 2026-05-30: real STATUS reg (sts/f1/f0/IBF/OBF) from the i8041 core —
+	// was faked as {6'b0,IBF=0,OBF=host_dout_oe}. Needed for the BIOS<->MCU tape handshake.
+	.mcu_dbb_sts       (mcu_host_sts),
 	.mcu_status_d2     (mcu_p2_out[2]),
 	.mcu_status_d0     (mcu_p2_out[0])
 );
@@ -912,6 +917,13 @@ dongle_mux dongle_mux_inst (
 // Tie legacy `dongle_din_low4` to the low nibble of the 8-bit output
 // (mcu_tape_iface still uses dongle_din_low4 for its cpu_din formula).
 assign dongle_din_low4 = dongle_din_full[3:0];
+
+// DONGLE BYPASS FIX 2026-05-30: the $E5xx read must go through the dongle on the DATA path.
+// MAME decocass_e5xx_r: (offset & E5XX_MASK)==2 -> composite STATUS byte; else -> m_dongle_r(offset).
+// e5xx_dongle (from mcu_tape_iface) already returns the correct STATUS byte for cpu_addr[1]==1, so
+// keep it there; route cpu_addr[1]==0 (DATA) through dongle_mux's dongle_din_full (nodong/type1/
+// type3 each handle their A0 split internally). Was: decocass.v fed raw e5xx_dongle, dongle ignored.
+assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle : dongle_din_full;
 
 // Dongle PROM (4 KB, shared across types 2-5; Type 3 needs full 4 KB).
 // During load: rom_loader drives dongleprom_addr; during run: dongle_mux drives dprom_addr.
@@ -1203,6 +1215,8 @@ reg [19:0] diag_alive_cnt;
 reg e414_we_ever, e701_rd_ever, e700_rd_ever, a000_re_ever, c000_we_ever, airq_ever;
 reg [7:0]  audio_a_prev;
 reg [19:0] audio_alive_cnt;
+// TAPE-DECK chain-of-custody (row 2 repurposed 2026-05-30): traces the load handshake.
+reg e5wr_ever, ibf_ever, rclk_ever, rdata_ever, obf_ever, req_ever, e5rd_ever;
 always @(posedge clk_sys) begin
     if (reset) begin
         cpu_sync_ever <= 1'b0; palram_wr_ever <= 1'b0; charram_wr_ever <= 1'b0;
@@ -1211,6 +1225,7 @@ always @(posedge clk_sys) begin
         e414_we_ever <= 1'b0; e701_rd_ever <= 1'b0; e700_rd_ever <= 1'b0;
         a000_re_ever <= 1'b0; c000_we_ever <= 1'b0; airq_ever <= 1'b0;
         audio_a_prev <= 8'd0; audio_alive_cnt <= 20'd0;
+        e5wr_ever<=1'b0; ibf_ever<=1'b0; rclk_ever<=1'b0; rdata_ever<=1'b0; obf_ever<=1'b0; req_ever<=1'b0; e5rd_ever<=1'b0;
     end else begin
         if (cpu_sync)            cpu_sync_ever      <= 1'b1;
         if (cpu_we_palram)       palram_wr_ever     <= 1'b1;
@@ -1231,6 +1246,14 @@ always @(posedge clk_sys) begin
         audio_a_prev <= audio_cpu_addr;
         if (audio_cpu_addr != audio_a_prev) audio_alive_cnt <= 20'hFFFFF;
         else if (audio_alive_cnt != 20'd0)  audio_alive_cnt <= audio_alive_cnt - 20'd1;
+        // TAPE-DECK chain-of-custody latches (row 2)
+        if (cpu_we_e5xx)     e5wr_ever  <= 1'b1;   // BIOS wrote a command to the MCU
+        if (mcu_host_sts[1]) ibf_ever   <= 1'b1;   // MCU input-buffer-full (got the command)
+        if (tape_clock)      rclk_ever  <= 1'b1;   // deck produced a read clock
+        if (tape_data)       rdata_ever <= 1'b1;   // deck produced read data
+        if (mcu_host_sts[0]) obf_ever   <= 1'b1;   // MCU output-buffer-full (assembled a byte)
+        if (~mcu_p1_out[7])  req_ever   <= 1'b1;   // MCU asserted REQ/ (signaled the BIOS)
+        if (cpu_re_e5xx)     e5rd_ever  <= 1'b1;   // BIOS read $E5xx (consumed status/data)
     end
 end
 wire cpu_alive = (diag_alive_cnt != 20'd0);
@@ -1282,14 +1305,15 @@ reg [7:0] cell2_r, cell2_g, cell2_b;
 always @(*) begin
     cell2_r = 8'd0; cell2_g = 8'd0; cell2_b = 8'd0;
     case (diag_cell)
-        3'd0: if (audio_alive)  cell2_g = 8'hFF;                            // GREEN
-        3'd1: if (e414_we_ever) begin cell2_g = 8'hFF; cell2_b = 8'hFF; end // CYAN
-        3'd2: if (e701_rd_ever) cell2_b = 8'hFF;                            // BLUE
-        3'd3: if (e700_rd_ever) cell2_r = 8'hFF;                            // RED
-        3'd4: if (a000_re_ever) begin cell2_r = 8'hFF; cell2_g = 8'hFF; end // YELLOW
-        3'd5: if (c000_we_ever) begin cell2_r = 8'hFF; cell2_b = 8'hFF; end // MAGENTA
-        3'd6: if (airq_ever)    begin cell2_r = 8'hFF; cell2_g = 8'h80; end // ORANGE
-        3'd7:                   begin cell2_r = 8'hFF; cell2_g = 8'hFF; cell2_b = 8'hFF; end // WHITE
+        // TAPE-DECK chain-of-custody (position = load-handshake order; read by POSITION, see HANDOFF)
+        3'd0: if (e5wr_ever)       begin cell2_g = 8'hFF; cell2_b = 8'hFF; end // 0 E5WR  BIOS wrote cmd
+        3'd1: if (ibf_ever)        cell2_b = 8'hFF;                            // 1 IBF   MCU got cmd
+        3'd2: if (tape_motor_ever) begin cell2_r = 8'hFF; cell2_g = 8'h80; end // 2 MOTOR spun tape
+        3'd3: if (rclk_ever)       cell2_g = 8'hFF;                            // 3 RCLK  deck clock
+        3'd4: if (rdata_ever)      begin cell2_r = 8'hFF; cell2_g = 8'hFF; end // 4 RDATA deck data
+        3'd5: if (obf_ever)        begin cell2_r = 8'hFF; cell2_b = 8'hFF; end // 5 OBF   MCU has byte
+        3'd6: if (req_ever)        cell2_r = 8'hFF;                            // 6 REQ   MCU signaled BIOS
+        3'd7: if (e5rd_ever)       begin cell2_r = 8'hFF; cell2_g = 8'hFF; cell2_b = 8'hFF; end // 7 E5RD BIOS read
     endcase
 end
 
@@ -1337,9 +1361,11 @@ wire [5:0] diag_pen = diag_swatch ? {1'b0, diag_swatch_index} : mixer_pen;
 // wire [7:0] core_b = {core_b_hi, core_b_hi};
 // DIAG OFF 2026-05-30 — overlay disabled to view the clean boot logo (the decrypt fix worked).
 // Re-arm: restore `diag_direct ? diag_r8/g8/b8 :` and `.pen(diag_pen)` below.
-wire [7:0] core_r = {core_r_hi, core_r_hi};
-wire [7:0] core_g = {core_g_hi, core_g_hi};
-wire [7:0] core_b = {core_b_hi, core_b_hi};
+// RE-ARMED 2026-05-30 for the TAPE-DECK chain overlay (row 2) + the bus-bar last_rd probe.
+// Swatch (.pen) stays OFF. Disable: set these back to just {core_*_hi, core_*_hi}.
+wire [7:0] core_r = diag_direct ? diag_r8 : {core_r_hi, core_r_hi};
+wire [7:0] core_g = diag_direct ? diag_g8 : {core_g_hi, core_g_hi};
+wire [7:0] core_b = diag_direct ? diag_b8 : {core_b_hi, core_b_hi};
 // DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   <<< END DIAGNOSTIC <<<
 //========================================================================
 
@@ -1366,9 +1392,9 @@ video_palette video_palette_inst (
 	.cpu_we       (cpu_we_palram),
 	.cpu_addr     ({3'b000, cpu_addr[4:0] ^ 5'b10000}),
 	.cpu_dout     (cpu_dout),
-	// DIAG-REVERT-2026-05-29: original below, restore to revert the palette swatch
-	// .pen          (mixer_pen),
-	.pen          (diag_pen),
+	// DIAG OFF 2026-05-30: swatch disabled to view clean graphics. Re-arm: swap back to .pen(diag_pen).
+	.pen          (mixer_pen),
+	// .pen          (diag_pen),
 	.prom_index   (5'h00),
 	.red          (core_r_hi),
 	.grn          (core_g_hi),
@@ -1461,6 +1487,10 @@ assign AUDIO_S = 1'b1;
 // 2026-05-18 — LED_USER as tape-motor activity indicator. tape_motor_on is
 // asserted whenever MCU commands FWD or REW. Visible signal of whether the
 // MCU/tape interface is alive without staring at the screen.
-assign LED_USER  = tape_motor_on;
+// DIAG-REVERT-2026-05-30: use the STICKY tape_motor_ever so a single motor pulse latches the LED
+// (definitive "did the MCU ever spin the tape?" probe for the Flying Ball test). Revert: restore
+// the live `tape_motor_on` line below.
+// assign LED_USER  = tape_motor_on;
+assign LED_USER  = tape_motor_ever;
 
 endmodule

@@ -79,6 +79,7 @@ entity upi41_core is
     sync_o        : out std_logic;
     db_i          : in  std_logic_vector( 7 downto 0);
     db_o          : out std_logic_vector( 7 downto 0);
+    sts_o         : out std_logic_vector( 7 downto 0);  -- DBBSTS exposure 2026-05-30
     db_dir_o      : out std_logic;
     t1_i          : in  std_logic;
     p2_i          : in  std_logic_vector( 7 downto 0);
@@ -384,6 +385,7 @@ begin
         wr_n_i       => wr_n_i,
         db_i         => db_i,
         db_o         => db_o,
+        sts_o        => sts_o,        -- DBBSTS exposure 2026-05-30
         db_dir_o     => db_dir_o
       );
 

@@ -131,11 +131,12 @@ module mcu_tape_iface (
 
     assign tape_motor_on     = fwd_active | rew_active;
     assign tape_direction    = fwd_active;       // 1 = forward, 0 = rewind
-    // Per tape_streamer.v: 00=stop, 01=normal, 10=fast-fwd, 11=rewind
-    assign tape_speed_select = (!(fwd_active | rew_active)) ? 2'b00 :
-                               rew_active                   ? 2'b11 :
-                               fast_active                  ? 2'b10 :
-                                                              2'b01;
+    // FIX 2026-05-30: speed_select now encodes MAGNITUDE only (direction is tape_direction above);
+    // 00=stop, 01=normal(1x), 10=fast(7x) — matches MAME |speed| 0/1/7. Was 11=rewind (direction
+    // baked in), which left fast-rewind indistinguishable from normal and the streamer ignored it.
+    assign tape_speed_select = (!(fwd_active | rew_active)) ? 2'b00 :  // stopped
+                               fast_active                   ? 2'b10 :  // fast (7x)
+                                                               2'b01;   // normal (1x)
 
     //------------------------------------------------------------------------
     // P2 Wiring (decocass_m.cpp lines 1791-1835)

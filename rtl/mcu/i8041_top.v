@@ -44,6 +44,7 @@ module i8041_top (
     input  wire        a0,             // Address bit 0 (selects register)
     input  wire [7:0]  host_din,       // 6502 data bus → MCU
     output wire [7:0]  host_dout,      // MCU data bus → 6502
+    output wire [7:0]  host_sts,       // DBBSTS exposure 2026-05-30: real STATUS reg (OBF/IBF/F0/F1/ST4-7)
     output wire        host_dout_oe,   // Output enable for MCU (tristate control)
     output wire        sync_o,         // SYNC output (ALE signal)
 
@@ -128,6 +129,7 @@ module i8041_top (
         .a0_i           (a0),           // Address bit 0 (0=command, 1=data)
         .db_i           (host_din),     // Data bus input
         .db_o           (host_dout),    // Data bus output
+        .sts_o          (host_sts),     // DBBSTS exposure 2026-05-30
         .db_dir_o       (host_dout_oe), // Output enable (active-high)
         .sync_o         (sync_o),       // Sync/ALE output (strobes addresses)
 

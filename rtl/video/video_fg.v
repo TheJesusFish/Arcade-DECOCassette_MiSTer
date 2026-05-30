@@ -134,13 +134,15 @@ module video_fg (
     // ========================================
     // Pixel shift pipeline — 3 bits per pixel from 3 planes
     //
-    // MAME charlayout xoffset = STEP8(0,1) means pixel x is at bit x of the
-    // byte (LSB-first). We load the byte and shift RIGHT each pixel,
-    // extracting pen bits from bit [0] of each plane's shift register.
+    // FLIP-FIX 2026-05-30: MAME's gfx decode is MSB-FIRST — pixel x reads bit (7-x) via the
+    // `(src >> (7 - (bit&7)))` extraction, NOT "bit x". The old code (commented below) read bit[0]
+    // and shifted RIGHT (LSB-first) → every FG glyph mirrored horizontally (DECO boot screen: logo
+    // OK because it's sprites, but CASSETTE / SYSTEM / WAIT... all backwards). Fix = read bit[7],
+    // shift LEFT. OLD: assign pen={pat_p2_sr[0],pat_p1_sr[0],pat_p0_sr[0]}; shift {1'b0,sr[7:1]}.
     // ========================================
     reg [7:0] pat_p0_sr, pat_p1_sr, pat_p2_sr;
     wire [2:0] pen;
-    assign pen = { pat_p2_sr[0], pat_p1_sr[0], pat_p0_sr[0] };
+    assign pen = { pat_p2_sr[7], pat_p1_sr[7], pat_p0_sr[7] };
 
     always @(posedge clk_sys) begin
         if (ce_pix) begin
@@ -150,10 +152,10 @@ module video_fg (
                 pat_p1_sr <= char_p1;
                 pat_p2_sr <= char_p2;
             end else begin
-                // Shift right for next pixel
-                pat_p0_sr <= {1'b0, pat_p0_sr[7:1]};
-                pat_p1_sr <= {1'b0, pat_p1_sr[7:1]};
-                pat_p2_sr <= {1'b0, pat_p2_sr[7:1]};
+                // Shift LEFT for next pixel (MSB-first — see FLIP-FIX above)
+                pat_p0_sr <= {pat_p0_sr[6:0], 1'b0};
+                pat_p1_sr <= {pat_p1_sr[6:0], 1'b0};
+                pat_p2_sr <= {pat_p2_sr[6:0], 1'b0};
             end
         end
     end

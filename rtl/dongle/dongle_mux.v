@@ -24,7 +24,7 @@ module dongle_mux (
     input  wire        reset,
 
     input  wire [2:0]  dongle_type,
-    input  wire [3:0]  game_id,
+    input  wire [7:0]  game_id,    // 2026-05-30: 8-bit = DECO release number (type1 case key)
     input  wire [3:0]  swap_mode,
 
     input  wire        cpu_re,

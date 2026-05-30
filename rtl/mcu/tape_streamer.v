@@ -56,11 +56,14 @@ module tape_streamer (
     localparam REGION_BOT_END       = REGION_LEADER_GAP_END + BOT_CLOCKS;
     localparam REGION_BOT_GAP_END   = REGION_BOT_END + BOT_GAP_CLOCKS;
 
-    // Data block structure: 297 bytes per block (from decocass_tape.h)
+    // Data block structure (MAME decocass_tape.h BYTE_BLOCK_TOTAL = 331):
     // PRE_GAP(34) + LEADIN(1) + HEADER(1) + DATA(256) + CRC_MSB(1) + CRC_LSB(1) +
-    // TRAILER(1) + LEADOUT(1) + LONGCLOCK(1) + POSTGAP(34) = 297 bytes
+    // TRAILER(1) + LEADOUT(1) + LONGCLOCK(1) + POSTGAP(34) = 331 bytes
+    // FIX 2026-05-30: was 297 — the predecessor summed through LONGCLOCK and DROPPED the
+    // 34-byte POSTGAP (its own comment lists it but mis-totals). Result: post-gap unreachable,
+    // every block mis-framed, total_clocks/EOT short by 34 bytes/block.
     // Each byte = 16 clock cycles at tape rate
-    localparam BYTES_PER_BLOCK      = 297;
+    localparam BYTES_PER_BLOCK      = 331;
     localparam CLOCKS_PER_BLOCK     = BYTES_PER_BLOCK * CLOCKS_PER_BYTE;
 
     // Byte indices within a block
@@ -124,22 +127,22 @@ module tape_streamer (
     // Tape position advance (motor-driven)
     // =====================================================================
 
+    // FIX 2026-05-30: honor FAST. MAME |speed| is 7 (fast) or 1 (normal); speed_select==2'b10
+    // = fast. Previously clockpos moved by ±1 regardless, so fast-fwd / fast-rewind ran at 1x and
+    // tape positioning (e.g. rewind-to-BOT) took 7x longer — a plausible "deck not responding".
+    wire [31:0] step = (speed_select == 2'b10) ? 32'd7 : 32'd1;
+
     always @(posedge clk_sys) begin
         if (reset) begin
             clockpos <= 0;
-        end else if (ce_tape) begin
-            if (motor_on) begin
-                if (direction) begin
-                    // Forward
-                    if (clockpos < total_clocks - 1)
-                        clockpos <= clockpos + 1;
-                end else begin
-                    // Rewind
-                    if (clockpos > 0)
-                        clockpos <= clockpos - 1;
-                end
+        end else if (ce_tape && motor_on) begin
+            if (direction) begin   // forward
+                clockpos <= (clockpos + step < total_clocks) ? (clockpos + step)
+                                                             : (total_clocks - 1);
+            end else begin         // rewind
+                clockpos <= (clockpos > step) ? (clockpos - step) : 32'd0;
             end
-            // Else: motor_on == 0, position holds
+            // motor_on == 0 -> position holds
         end
     end
 
@@ -223,10 +226,13 @@ module tape_streamer (
                              byte_offset >= BYTE_LEADIN &&
                              byte_offset <= BYTE_LONGCLOCK);
 
-    wire clk_bit = (data_region_clocks & 32'h1) ? 1'b0 : 1'b1;  // MAME line 305
+    // MAME decocass_tape.cpp:305 — read clock (bit 0x40) is HIGH when (clockpos-offset) is EVEN.
+    wire clk_bit = (data_region_clocks & 32'h1) ? 1'b0 : 1'b1;  // even -> 1, odd -> 0  (== MAME 0x40)
 
+    // FIX 2026-05-30: was `~clk_bit`, which inverted the read clock vs MAME -> MCU sampled tape
+    // data on the wrong edge -> no valid bytes -> "deck not responding". Now matches MAME line 305.
     assign tape_clock = (byte_offset == BYTE_LONGCLOCK) ? 1'b1 :  // LONGCLOCK holds high
-                       (clk_region_active) ? ~clk_bit :           // Inverted alternating clock
+                       (clk_region_active) ? clk_bit :            // alternating read clock (MAME polarity)
                        1'b0;                                       // Idle
 
     // =====================================================================

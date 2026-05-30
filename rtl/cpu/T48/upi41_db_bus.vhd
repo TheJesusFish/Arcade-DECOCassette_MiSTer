@@ -84,6 +84,7 @@ entity upi41_db_bus is
     wr_n_i       : in  std_logic;
     db_i         : in  word_t;
     db_o         : out word_t;
+    sts_o        : out word_t;    -- DBBSTS exposure 2026-05-30: real STATUS reg (sts/f1/f0/ibf/obf)
     db_dir_o     : out std_logic
   );
 
@@ -255,6 +256,7 @@ begin
   obf_o      <= obf_q;
   db_o       <= dbbout_q when a0_i = '0' or (dack_s and dma_q) else
                 status_q;
+  sts_o      <= status_q;   -- DBBSTS exposure 2026-05-30: always-available STATUS reg (was faked in wrapper)
   db_dir_o   <= '1' when read_s else '0';
   data_o     <=   dbbin_q
                 when read_bus_i else
