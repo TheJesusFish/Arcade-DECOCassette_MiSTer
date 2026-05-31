@@ -119,7 +119,11 @@ module i8041_top (
         // Clock & Reset
         .xtal_i         (clk_sys),      // XTAL input (system clock)
         .xtal_en_i      (ce_hclk),      // XTAL enable (6 MHz clock enable)
-        .reset_i        (~reset_n),     // Reset (active-high in T48; inverted from external reset_n)
+        // DIAG-REVERT-2026-05-30: T48 res_active_c='0' => reset is ACTIVE-LOW. The ~ here held the
+        // core in reset during NORMAL run (reset_n=1 -> ~reset_n=0 = res_active_c => permanent reset),
+        // so ibf_q/status_q were frozen at 0 and the MCU never executed. Pass reset_n straight.
+        // .reset_i        (~reset_n),     // ORIGINAL (WRONG: comment claimed active-high)
+        .reset_i        (reset_n),      // FIXED: active-low, matches T48 res_active_c='0'
 
         // Host interface (6502 bus at $E5xx)
         // These pins are decoded by upi41_db_bus inside the core

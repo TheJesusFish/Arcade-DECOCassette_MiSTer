@@ -711,6 +711,7 @@ wire [7:0]  mcu_p1_out, mcu_p2_out, mcu_p1_in, mcu_p2_in;
 wire        mcu_t0, mcu_t1;
 wire [7:0]  mcu_host_dout;
 wire [7:0]  mcu_host_sts;       // DBBSTS exposure 2026-05-30: real STATUS reg from the i8041 core
+wire        mcu_sync_o;         // DIAG-REVERT-2026-05-30: MCU ALE/sync strobe — toggles iff the MCU executes
 wire        mcu_host_dout_oe;
 wire        tape_motor_on, tape_direction;
 wire [1:0]  tape_speed_select;
@@ -729,7 +730,7 @@ i8041_top i8041_inst (
 	.host_dout       (mcu_host_dout),
 	.host_sts        (mcu_host_sts),       // DBBSTS exposure 2026-05-30
 	.host_dout_oe    (mcu_host_dout_oe),
-	.sync_o          (),
+	.sync_o          (mcu_sync_o),  // DIAG-REVERT-2026-05-30: was () — MCU execution liveness probe
 	.t0_i            (mcu_t0),
 	.t1_i            (mcu_t1),
 	.p1_i            (mcu_p1_in),
@@ -1217,6 +1218,13 @@ reg [7:0]  audio_a_prev;
 reg [19:0] audio_alive_cnt;
 // TAPE-DECK chain-of-custody (row 2 repurposed 2026-05-30): traces the load handshake.
 reg e5wr_ever, ibf_ever, rclk_ever, rdata_ever, obf_ever, req_ever, e5rd_ever;
+reg mcu_wr_seen_ever;  // DIAG-REVERT-2026-05-30: does the host WR strobe physically reach the MCU pin? (was cell7 - CONFIRMED white)
+reg sts_any_ever;      // DIAG-REVERT-2026-05-30: is the MCU status reg EVER non-zero? (was cell7) CONFIRMED BLACK
+reg cs_low_ever;       // DIAG-REVERT-2026-05-30: did mcu_cs_n ever assert (go low)? (cell6)
+reg wrs_ever;          // DIAG-REVERT-2026-05-30: did write_s (cs_n & wr_n BOTH low) ever assert at the MCU pin? (cell7)
+reg mcu_exec_ever, mcu_sync_prev;  // DIAG-REVERT-2026-05-30: did mcu_sync_o ever TOGGLE (MCU executing)? (cell6)
+reg ibf_cleared_ever;  // DIAG-REVERT-2026-05-30: did IBF go LOW after being high (MCU consumed the cmd via IN A,DBB)? (cell7)
+reg [7:0] mcu_p1_prev, mcu_p2_prev; reg port_post_cmd_ever;  // DIAG-REVERT-2026-05-30: did MCU drive any p1/p2 OUT bit AFTER consuming a cmd? (cell7)
 always @(posedge clk_sys) begin
     if (reset) begin
         cpu_sync_ever <= 1'b0; palram_wr_ever <= 1'b0; charram_wr_ever <= 1'b0;
@@ -1226,6 +1234,13 @@ always @(posedge clk_sys) begin
         a000_re_ever <= 1'b0; c000_we_ever <= 1'b0; airq_ever <= 1'b0;
         audio_a_prev <= 8'd0; audio_alive_cnt <= 20'd0;
         e5wr_ever<=1'b0; ibf_ever<=1'b0; rclk_ever<=1'b0; rdata_ever<=1'b0; obf_ever<=1'b0; req_ever<=1'b0; e5rd_ever<=1'b0;
+        mcu_wr_seen_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
+        sts_any_ever <= 1'b0;      // DIAG-REVERT-2026-05-30
+        cs_low_ever <= 1'b0;       // DIAG-REVERT-2026-05-30
+        wrs_ever <= 1'b0;          // DIAG-REVERT-2026-05-30
+        mcu_exec_ever <= 1'b0; mcu_sync_prev <= 1'b0;  // DIAG-REVERT-2026-05-30
+        ibf_cleared_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
+        mcu_p1_prev <= 8'd0; mcu_p2_prev <= 8'd0; port_post_cmd_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
     end else begin
         if (cpu_sync)            cpu_sync_ever      <= 1'b1;
         if (cpu_we_palram)       palram_wr_ever     <= 1'b1;
@@ -1254,6 +1269,15 @@ always @(posedge clk_sys) begin
         if (mcu_host_sts[0]) obf_ever   <= 1'b1;   // MCU output-buffer-full (assembled a byte)
         if (~mcu_p1_out[7])  req_ever   <= 1'b1;   // MCU asserted REQ/ (signaled the BIOS)
         if (cpu_re_e5xx)     e5rd_ever  <= 1'b1;   // BIOS read $E5xx (consumed status/data)
+        if (~mcu_wr_n)       mcu_wr_seen_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: host WR strobe asserted at the MCU pin
+        if (|mcu_host_sts)   sts_any_ever <= 1'b1;       // DIAG-REVERT-2026-05-30: any MCU status bit ever set (core bus-regs alive?)
+        if (~mcu_cs_n)             cs_low_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: cs_n asserted at the MCU pin
+        if (~mcu_cs_n & ~mcu_wr_n) wrs_ever    <= 1'b1;  // DIAG-REVERT-2026-05-30: write_s (cs_n & wr_n both low) at the MCU pin
+        mcu_sync_prev <= mcu_sync_o;                                       // DIAG-REVERT-2026-05-30
+        if (mcu_sync_o != mcu_sync_prev) mcu_exec_ever <= 1'b1;            // DIAG-REVERT-2026-05-30: sync_o toggled => MCU executing
+        if (ibf_ever & ~mcu_host_sts[1]) ibf_cleared_ever <= 1'b1;         // DIAG-REVERT-2026-05-30: IBF went low after high => MCU read DBBIN
+        mcu_p1_prev <= mcu_p1_out; mcu_p2_prev <= mcu_p2_out;              // DIAG-REVERT-2026-05-30
+        if (ibf_cleared_ever & ((mcu_p1_out != mcu_p1_prev) | (mcu_p2_out != mcu_p2_prev))) port_post_cmd_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: MCU drove a port out after consuming a cmd
     end
 end
 wire cpu_alive = (diag_alive_cnt != 20'd0);
@@ -1281,8 +1305,14 @@ always @(*) begin
         3'd3: if (charram_wr_ever)    cell_r = 8'hFF;                           // RED
         3'd4: if (fgvram_wr_ever)     begin cell_r = 8'hFF; cell_g = 8'hFF; end // YELLOW
         3'd5: if (mixer_nonfill_ever) begin cell_r = 8'hFF; cell_b = 8'hFF; end // MAGENTA
-        3'd6: if (tape_motor_ever)    begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE
-        3'd7:                         begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE
+        // DIAG-REVERT-2026-05-30: cell6 was tape_motor_ever (orig below); now cs_low_ever.
+        // 3'd6: if (tape_motor_ever)    begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE (orig)
+        3'd6: if (mcu_exec_ever)      begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE = MCU sync_o TOGGLED (core is EXECUTING)
+        // DIAG-REVERT-2026-05-30: cell7 was a static WHITE calib marker; repurposed to mcu_wr_seen_ever.
+        //   WHITE = host WR strobe reaches the MCU pin (bug is INSIDE the core's write_pulse sampling)
+        //   BLACK = iface never pulses mcu_wr_n      (bug is in mcu_tape_iface strobe gen, lines 207-244)
+        // 3'd7:                         begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE (orig static)
+        3'd7: if (port_post_cmd_ever) begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE = MCU drove a p1/p2 OUTPUT bit AFTER consuming a cmd
     endcase
 end
 

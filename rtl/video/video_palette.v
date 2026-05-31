@@ -11,7 +11,7 @@
 //
 // From decocass_v.cpp:323-333 (decocass_paletteram_w):
 //   - offset = (offset & 31) ^ 16  // XOR A4 (bit 4) into the CLUT index
-//   - RGB output is inverted: ~data[2:0] for G, ~data[5:3] for R, ~data[7:6] for B
+//   - RGB output is inverted: ~data[2:0] for R, ~data[5:3] for G, ~data[7:6] for B
 //   - pal3bit(x) = (x<<5)|(x<<2)|(x>>1)  // 3-bit to 4-bit expansion
 //   - pal2bit(x) = (x<<6)|(x<<4)|(x<<2)|x  // 2-bit to 4-bit expansion
 //
@@ -76,8 +76,8 @@ module video_palette (
     // The byte stored in the palette encodes RGB directly per
     // decocass_v.cpp:323-333:
     //   m_palette->set_indirect_color(offset,
-    //       rgb_t(pal3bit(~data >> 0),    // G
-    //             pal3bit(~data >> 3),    // R
+    //       rgb_t(pal3bit(~data >> 0),    // R
+    //             pal3bit(~data >> 3),    // G
     //             pal2bit(~data >> 6)));  // B
     //
     // So palram_dout (the byte BIOS wrote) IS the color — no CLUT lookup.
@@ -98,8 +98,8 @@ module video_palette (
     // so we take the bits directly here — no further inversion. That makes
     // default-0 BRAM decode to BLACK (matching MAME's default state) and
     // BIOS-written bytes decode to the same final RGB as MAME's `~data`.
-    wire [2:0] g_raw = palram_dout[2:0];    // green, 3 bits
-    wire [2:0] r_raw = palram_dout[5:3];    // red,   3 bits
+    wire [2:0] r_raw = palram_dout[2:0];    // red,   3 bits
+    wire [2:0] g_raw = palram_dout[5:3];    // green, 3 bits
     wire [1:0] b_raw = palram_dout[7:6];    // blue,  2 bits
 
     always @(posedge clk_sys) begin

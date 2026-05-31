@@ -204,6 +204,13 @@ module mcu_tape_iface (
     end
     wire       ce_hclk1_rising = ce_hclk1_r && !ce_hclk1_rr;
 
+    // ===== DIAG-REVERT-2026-05-30: original host-strobe gen was PHASE-BROKEN =====
+    // cpu_e5_we is 1 clk_sys wide *during* ce_hclk1, but ce_hclk1_rising (above) is delayed
+    // one clk_sys, so `cpu_e5_we_lat <= cpu_e5_we` sampled the pulse a cycle late and latched
+    // 0. mcu_wr_n therefore NEVER asserted -> i8041 IBF never set -> CASSETTE ERROR 59.
+    // (Confirmed on FPGA: diag cell7 = mcu_wr_seen_ever was BLACK.)
+    // TO REVERT: delete the FIXED block below and un-/* */ the original.
+    /* ---- ORIGINAL (broken), preserved verbatim ----
     // Latch CPU strobes on rising edge of ce_hclk1
     reg        cpu_e5_re_lat, cpu_e5_we_lat;
     reg [7:0]  cpu_addr_lo_lat, cpu_dout_lat;
@@ -215,16 +222,41 @@ module mcu_tape_iface (
             cpu_dout_lat   <= cpu_dout;
         end
     end
-
-    // Strobe pulse stretcher: extend to 2 ce_hclk cycles
-    // ce_hclk runs at 6 MHz = 16.67 ns period (on 96 MHz clock = 10.42 ns)
-    // ce_hclk @ 6 MHz means one pulse every 16 clk_sys cycles
-    // Two ce_hclk pulses = 32 clk_sys cycles
-    // But we're deriving from ce_hclk1, not counting clk_sys directly.
-    // A simpler approach: use a counter that fires on ce_hclk edges.
-
     reg  [1:0] hclk_strobe_cnt;
     wire       hclk_strobe_active = (hclk_strobe_cnt != 0);
+    reg        ce_hclk_r, ce_hclk_rr;
+    always @(posedge clk_sys) begin
+        ce_hclk_r  <= ce_hclk;
+        ce_hclk_rr <= ce_hclk_r;
+    end
+    wire       ce_hclk_rising = ce_hclk_r && !ce_hclk_rr;
+    always @(posedge clk_sys or posedge reset) begin
+        if (reset) begin
+            hclk_strobe_cnt <= 0;
+        end else if ((cpu_e5_re_lat || cpu_e5_we_lat) && !hclk_strobe_active) begin
+            if (ce_hclk_rising)
+                hclk_strobe_cnt <= 2;
+        end else if (ce_hclk_rising && hclk_strobe_active) begin
+            hclk_strobe_cnt <= hclk_strobe_cnt - 1;
+        end
+    end
+    assign     mcu_cs_n  = ~hclk_strobe_active;
+    assign     mcu_rd_n  = ~(hclk_strobe_active && cpu_e5_re_lat);
+    assign     mcu_wr_n  = ~(hclk_strobe_active && cpu_e5_we_lat);
+    assign     mcu_a0    = cpu_addr_lo_lat[0];
+    assign     mcu_dout  = cpu_dout_lat;
+    ---- end original ---- */
+
+    // ===== FIXED 2026-05-30: phase-independent capture + held op-type =====
+    // Latch the access the instant cpu_e5_we/re pulses (addr+data valid then), hold it in a
+    // sticky 'pending' flag until a 2-ce_hclk strobe can launch, and hold the op-type for the
+    // whole window so mcu_wr_n/mcu_rd_n stay asserted long enough for the i8041 db_bus to
+    // register the write (and set IBF). Write takes priority if a read is also pending.
+    reg        pend_we, pend_re;
+    reg        strobe_is_we, strobe_is_re;
+    reg [7:0]  cpu_addr_lo_lat, cpu_dout_lat;
+    reg  [1:0] hclk_strobe_cnt;
+    wire       hclk_strobe_active = (hclk_strobe_cnt != 2'd0);
 
     reg        ce_hclk_r, ce_hclk_rr;
     always @(posedge clk_sys) begin
@@ -235,21 +267,38 @@ module mcu_tape_iface (
 
     always @(posedge clk_sys or posedge reset) begin
         if (reset) begin
-            hclk_strobe_cnt <= 0;
-        end else if ((cpu_e5_re_lat || cpu_e5_we_lat) && !hclk_strobe_active) begin
-            // Initiate strobe: count 2 ce_hclk pulses
-            if (ce_hclk_rising)
-                hclk_strobe_cnt <= 2;
-        end else if (ce_hclk_rising && hclk_strobe_active) begin
-            hclk_strobe_cnt <= hclk_strobe_cnt - 1;
+            pend_we <= 1'b0; pend_re <= 1'b0;
+            strobe_is_we <= 1'b0; strobe_is_re <= 1'b0;
+            hclk_strobe_cnt <= 2'd0;
+            cpu_addr_lo_lat <= 8'd0; cpu_dout_lat <= 8'd0;
+        end else begin
+            // Capture addr/data on the live CPU access strobe (valid this cycle).
+            if (cpu_e5_we) begin cpu_addr_lo_lat <= cpu_addr_lo; cpu_dout_lat <= cpu_dout; end
+            else if (cpu_e5_re) cpu_addr_lo_lat <= cpu_addr_lo;
+
+            if (!hclk_strobe_active && ce_hclk_rising &&
+                (pend_we || cpu_e5_we || pend_re || cpu_e5_re)) begin
+                hclk_strobe_cnt <= 2'd2;
+                if (pend_we || cpu_e5_we) begin       // write priority
+                    strobe_is_we <= 1'b1; strobe_is_re <= 1'b0;
+                    pend_we <= 1'b0;                  // a co-pending read stays queued
+                end else begin
+                    strobe_is_we <= 1'b0; strobe_is_re <= 1'b1;
+                    pend_re <= 1'b0;
+                end
+            end else begin
+                if (cpu_e5_we) pend_we <= 1'b1;
+                if (cpu_e5_re) pend_re <= 1'b1;
+                if (hclk_strobe_active && ce_hclk_rising)
+                    hclk_strobe_cnt <= hclk_strobe_cnt - 2'd1;
+            end
         end
     end
 
     // Drive MCU host bus during strobe window (exposed via output ports)
-    // cs_n, rd_n, wr_n are active-low; we assert them when strobing
     assign     mcu_cs_n  = ~hclk_strobe_active;
-    assign     mcu_rd_n  = ~(hclk_strobe_active && cpu_e5_re_lat);
-    assign     mcu_wr_n  = ~(hclk_strobe_active && cpu_e5_we_lat);
+    assign     mcu_rd_n  = ~(hclk_strobe_active && strobe_is_re);
+    assign     mcu_wr_n  = ~(hclk_strobe_active && strobe_is_we);
     assign     mcu_a0    = cpu_addr_lo_lat[0];
     assign     mcu_dout  = cpu_dout_lat;
 
