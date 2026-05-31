@@ -711,7 +711,6 @@ wire [7:0]  mcu_p1_out, mcu_p2_out, mcu_p1_in, mcu_p2_in;
 wire        mcu_t0, mcu_t1;
 wire [7:0]  mcu_host_dout;
 wire [7:0]  mcu_host_sts;       // DBBSTS exposure 2026-05-30: real STATUS reg from the i8041 core
-wire        mcu_sync_o;         // DIAG-REVERT-2026-05-30: MCU ALE/sync strobe — toggles iff the MCU executes
 wire        mcu_host_dout_oe;
 wire        tape_motor_on, tape_direction;
 wire [1:0]  tape_speed_select;
@@ -730,7 +729,7 @@ i8041_top i8041_inst (
 	.host_dout       (mcu_host_dout),
 	.host_sts        (mcu_host_sts),       // DBBSTS exposure 2026-05-30
 	.host_dout_oe    (mcu_host_dout_oe),
-	.sync_o          (mcu_sync_o),  // DIAG-REVERT-2026-05-30: was () — MCU execution liveness probe
+	.sync_o          (),
 	.t0_i            (mcu_t0),
 	.t1_i            (mcu_t1),
 	.p1_i            (mcu_p1_in),
@@ -1165,239 +1164,9 @@ video_missiles video_missiles_inst (
 wire [3:0] core_r_hi, core_g_hi, core_b_hi;
 wire [5:0] mixer_pen;
 wire       mixer_modulate;
-// DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   >>> DIAGNOSTIC >>>
-// Mirrors the Kyugo swatch overlay (kyugo_video_audit_2026-05-28). Predecessor's
-// compile-6 showed mixer_pen stuck at 8 (BG_FILL) everywhere -> screen = palette[8].
-// Two unknowns this splits in ONE compile: (1) is the palette RAM actually populated
-// with real colour, or empty/black? (2) does any layer EVER become opaque (renderer
-// produces a pixel)? Bands at top of the (pre-rotation) raster:
-//
-//   vcnt 16..31 : ROW 1 — 8 PROOF-OF-LIFE cells, 32px each. DISTINCT colour if the
-//                 sticky flag is TRUE, else BLACK. These are the "did the CPU get PAST
-//                 the MCU handshake" milestones — once the handshake is fixed they flip on:
-//     0 GREEN   cpu_alive       — deco222 address bus is changing (executing)
-//     1 CYAN    cpu_sync_ever   — CPU fetched at least one opcode (cpu_sync pulsed)
-//     2 BLUE    palram_wr_ever  — BIOS has written palette RAM ($E000-$E0FF)
-//     3 RED     charram_wr_ever — CPU wrote FG char planes (glyph bitmap data)
-//     4 YELLOW  fgvram_wr_ever  — CPU wrote the FG tilemap (which glyph where)
-//     5 MAGENTA mixer_nonfill   — mixer_pen was EVER != 8 (a layer won priority)
-//     6 ORANGE  tape_motor_ever — cassette transport ran (the "USER LED" sign of life)
-//     7 WHITE   calibration     — ALWAYS on (proves overlay renders + rbf is fresh +
-//                                 pause->arcade_video->scaler output path is alive)
-//   vcnt 32..47 : ROW 2 — 8 SOUND-HANDSHAKE cells (main<->audio 6502; the suspected stall;
-//                 see the row-2 colour legend at the cell2_* block below). DECO twin of
-//                 Kyugo's row-2 coprocessor probe.
-//   vcnt 48..79 : CPU BUS BAR — RGB straight from cpu_addr/cpu_dout. Moving stipple =
-//                 CPU executing across addresses; a frozen solid block = stuck/halted.
-//   vcnt 80..207: PALETTE SWATCH — 8x4 grid, palette read index forced to the cell
-//                 index 0..31, shown through the NORMAL palette path. Real colours =
-//                 palette RAM populated; all-black = palette empty (the Kyugo bug
-//                 class). Cell 8 (row 1, col 0) is pen 8 = BG_FILL = the whole-screen
-//                 colour when the mixer is stuck — if cell 8 is black the bg fill
-//                 itself is unwritten.
-//   vcnt 208..247: untouched normal game render.
-//
-// READING IT: cell7 white but cell0 black -> CPU halted (root). cell0 green but cell2
-//   black -> BIOS never wrote palette -> swatch black -> palette empty. cell2 green
-//   but swatch still all-black -> palette write/decode path broken (look at the XOR /
-//   invert in video_palette.v). swatch colourful but cell5 black -> palette fine, no
-//   layer ever opaque -> renderer never emits a pixel (FG transparent everywhere:
-//   prefetch / opaque-flag bug). swatch colourful + cell5 green + game band still
-//   black -> mixing/priority bug downstream.
-//
-// REVERT: delete this whole block, restore .pen(mixer_pen) on video_palette_inst, and
-// uncomment the 3 original core_r/g/b assigns just below.
-//========================================================================
-reg cpu_sync_ever, palram_wr_ever, charram_wr_ever, fgvram_wr_ever;
-reg mixer_nonfill_ever, tape_motor_ever;
-reg [15:0] diag_a_prev;
-reg [19:0] diag_alive_cnt;
-// Row-2 (main<->audio-CPU SOUND handshake) sticky probes — the suspected stall site.
-reg e414_we_ever, e701_rd_ever, e700_rd_ever, a000_re_ever, c000_we_ever, airq_ever;
-reg [7:0]  audio_a_prev;
-reg [19:0] audio_alive_cnt;
-// TAPE-DECK chain-of-custody (row 2 repurposed 2026-05-30): traces the load handshake.
-reg e5wr_ever, ibf_ever, rclk_ever, rdata_ever, obf_ever, req_ever, e5rd_ever;
-reg mcu_wr_seen_ever;  // DIAG-REVERT-2026-05-30: does the host WR strobe physically reach the MCU pin? (was cell7 - CONFIRMED white)
-reg sts_any_ever;      // DIAG-REVERT-2026-05-30: is the MCU status reg EVER non-zero? (was cell7) CONFIRMED BLACK
-reg cs_low_ever;       // DIAG-REVERT-2026-05-30: did mcu_cs_n ever assert (go low)? (cell6)
-reg wrs_ever;          // DIAG-REVERT-2026-05-30: did write_s (cs_n & wr_n BOTH low) ever assert at the MCU pin? (cell7)
-reg mcu_exec_ever, mcu_sync_prev;  // DIAG-REVERT-2026-05-30: did mcu_sync_o ever TOGGLE (MCU executing)? (cell6)
-reg ibf_cleared_ever;  // DIAG-REVERT-2026-05-30: did IBF go LOW after being high (MCU consumed the cmd via IN A,DBB)? (cell7)
-reg [7:0] mcu_p1_prev, mcu_p2_prev; reg port_post_cmd_ever;  // DIAG-REVERT-2026-05-30: did MCU drive any p1/p2 OUT bit AFTER consuming a cmd? (cell7)
-always @(posedge clk_sys) begin
-    if (reset) begin
-        cpu_sync_ever <= 1'b0; palram_wr_ever <= 1'b0; charram_wr_ever <= 1'b0;
-        fgvram_wr_ever <= 1'b0; mixer_nonfill_ever <= 1'b0; tape_motor_ever <= 1'b0;
-        diag_a_prev <= 16'd0; diag_alive_cnt <= 20'd0;
-        e414_we_ever <= 1'b0; e701_rd_ever <= 1'b0; e700_rd_ever <= 1'b0;
-        a000_re_ever <= 1'b0; c000_we_ever <= 1'b0; airq_ever <= 1'b0;
-        audio_a_prev <= 8'd0; audio_alive_cnt <= 20'd0;
-        e5wr_ever<=1'b0; ibf_ever<=1'b0; rclk_ever<=1'b0; rdata_ever<=1'b0; obf_ever<=1'b0; req_ever<=1'b0; e5rd_ever<=1'b0;
-        mcu_wr_seen_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
-        sts_any_ever <= 1'b0;      // DIAG-REVERT-2026-05-30
-        cs_low_ever <= 1'b0;       // DIAG-REVERT-2026-05-30
-        wrs_ever <= 1'b0;          // DIAG-REVERT-2026-05-30
-        mcu_exec_ever <= 1'b0; mcu_sync_prev <= 1'b0;  // DIAG-REVERT-2026-05-30
-        ibf_cleared_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
-        mcu_p1_prev <= 8'd0; mcu_p2_prev <= 8'd0; port_post_cmd_ever <= 1'b0;  // DIAG-REVERT-2026-05-30
-    end else begin
-        if (cpu_sync)            cpu_sync_ever      <= 1'b1;
-        if (cpu_we_palram)       palram_wr_ever     <= 1'b1;
-        if (charram_we_any)      charram_wr_ever    <= 1'b1;
-        if (cpu_we_fgvram)       fgvram_wr_ever     <= 1'b1;
-        if (mixer_pen != 6'd8)   mixer_nonfill_ever <= 1'b1;
-        if (tape_motor_on)       tape_motor_ever    <= 1'b1;
-        diag_a_prev <= cpu_addr;
-        if (cpu_addr != diag_a_prev)      diag_alive_cnt <= 20'hFFFFF;
-        else if (diag_alive_cnt != 20'd0) diag_alive_cnt <= diag_alive_cnt - 20'd1;
-        // Row 2 — main<->audio-CPU sound handshake ($E414 / $E700 / $E701 / $A000 / $C000)
-        if (cpu_we_e414)        e414_we_ever <= 1'b1;  // main sent a sound command
-        if (cpu_re_e701)        e701_rd_ever <= 1'b1;  // main polled the sound-ack (the spin)
-        if (cpu_re_e700)        e700_rd_ever <= 1'b1;  // main read sound data
-        if (audio_from_main_re) a000_re_ever <= 1'b1;  // audio CPU consumed the cmd ($A000 read)
-        if (audio_to_main_we)   c000_we_ever <= 1'b1;  // audio CPU wrote a response ($C000)
-        if (audio_irq)          airq_ever    <= 1'b1;  // sound IRQ to the audio CPU ever asserted
-        audio_a_prev <= audio_cpu_addr;
-        if (audio_cpu_addr != audio_a_prev) audio_alive_cnt <= 20'hFFFFF;
-        else if (audio_alive_cnt != 20'd0)  audio_alive_cnt <= audio_alive_cnt - 20'd1;
-        // TAPE-DECK chain-of-custody latches (row 2)
-        if (cpu_we_e5xx)     e5wr_ever  <= 1'b1;   // BIOS wrote a command to the MCU
-        if (mcu_host_sts[1]) ibf_ever   <= 1'b1;   // MCU input-buffer-full (got the command)
-        if (tape_clock)      rclk_ever  <= 1'b1;   // deck produced a read clock
-        if (tape_data)       rdata_ever <= 1'b1;   // deck produced read data
-        if (mcu_host_sts[0]) obf_ever   <= 1'b1;   // MCU output-buffer-full (assembled a byte)
-        if (~mcu_p1_out[7])  req_ever   <= 1'b1;   // MCU asserted REQ/ (signaled the BIOS)
-        if (cpu_re_e5xx)     e5rd_ever  <= 1'b1;   // BIOS read $E5xx (consumed status/data)
-        if (~mcu_wr_n)       mcu_wr_seen_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: host WR strobe asserted at the MCU pin
-        if (|mcu_host_sts)   sts_any_ever <= 1'b1;       // DIAG-REVERT-2026-05-30: any MCU status bit ever set (core bus-regs alive?)
-        if (~mcu_cs_n)             cs_low_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: cs_n asserted at the MCU pin
-        if (~mcu_cs_n & ~mcu_wr_n) wrs_ever    <= 1'b1;  // DIAG-REVERT-2026-05-30: write_s (cs_n & wr_n both low) at the MCU pin
-        mcu_sync_prev <= mcu_sync_o;                                       // DIAG-REVERT-2026-05-30
-        if (mcu_sync_o != mcu_sync_prev) mcu_exec_ever <= 1'b1;            // DIAG-REVERT-2026-05-30: sync_o toggled => MCU executing
-        if (ibf_ever & ~mcu_host_sts[1]) ibf_cleared_ever <= 1'b1;         // DIAG-REVERT-2026-05-30: IBF went low after high => MCU read DBBIN
-        mcu_p1_prev <= mcu_p1_out; mcu_p2_prev <= mcu_p2_out;              // DIAG-REVERT-2026-05-30
-        if (ibf_cleared_ever & ((mcu_p1_out != mcu_p1_prev) | (mcu_p2_out != mcu_p2_prev))) port_post_cmd_ever <= 1'b1;  // DIAG-REVERT-2026-05-30: MCU drove a port out after consuming a cmd
-    end
-end
-wire cpu_alive = (diag_alive_cnt != 20'd0);
-wire audio_alive = (audio_alive_cnt != 20'd0);
-
-// Band detection (pre-rotation raster; DECO visible = hcnt 0..255, vcnt 8..247)
-wire diag_status  = (vcnt >= 9'd16) & (vcnt < 9'd32)  & (hcnt < 9'd256);  // row 1 (proof-of-life)
-wire diag_status2 = (vcnt >= 9'd32) & (vcnt < 9'd48)  & (hcnt < 9'd256);  // row 2 (sound handshake)
-wire diag_busbar  = (vcnt >= 9'd48) & (vcnt < 9'd80)  & (hcnt < 9'd256);
-wire diag_swatch = (vcnt >= 9'd80) & (vcnt < 9'd208) & (hcnt < 9'd256);
-
-wire [2:0] diag_cell = hcnt[7:5];                 // 0..7, 32px cells
-wire [2:0] sw_col    = hcnt[7:5];                 // 0..7
-wire [1:0] sw_row    = (vcnt - 9'd80) >> 5;       // 0..3, 32 lines per row
-wire [4:0] diag_swatch_index = {sw_row, sw_col};  // 0..31
-
-// Status cells: distinct saturated colours, BLACK when the flag is false.
-reg [7:0] cell_r, cell_g, cell_b;
-always @(*) begin
-    cell_r = 8'd0; cell_g = 8'd0; cell_b = 8'd0;
-    case (diag_cell)
-        3'd0: if (cpu_alive)          cell_g = 8'hFF;                           // GREEN
-        3'd1: if (cpu_sync_ever)      begin cell_g = 8'hFF; cell_b = 8'hFF; end // CYAN
-        3'd2: if (palram_wr_ever)     cell_b = 8'hFF;                           // BLUE
-        3'd3: if (charram_wr_ever)    cell_r = 8'hFF;                           // RED
-        3'd4: if (fgvram_wr_ever)     begin cell_r = 8'hFF; cell_g = 8'hFF; end // YELLOW
-        3'd5: if (mixer_nonfill_ever) begin cell_r = 8'hFF; cell_b = 8'hFF; end // MAGENTA
-        // DIAG-REVERT-2026-05-30: cell6 was tape_motor_ever (orig below); now cs_low_ever.
-        // 3'd6: if (tape_motor_ever)    begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE (orig)
-        3'd6: if (mcu_exec_ever)      begin cell_r = 8'hFF; cell_g = 8'h80; end // ORANGE = MCU sync_o TOGGLED (core is EXECUTING)
-        // DIAG-REVERT-2026-05-30: cell7 was a static WHITE calib marker; repurposed to mcu_wr_seen_ever.
-        //   WHITE = host WR strobe reaches the MCU pin (bug is INSIDE the core's write_pulse sampling)
-        //   BLACK = iface never pulses mcu_wr_n      (bug is in mcu_tape_iface strobe gen, lines 207-244)
-        // 3'd7:                         begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE (orig static)
-        3'd7: if (port_post_cmd_ever) begin cell_r = 8'hFF; cell_g = 8'hFF; cell_b = 8'hFF; end // WHITE = MCU drove a p1/p2 OUTPUT bit AFTER consuming a cmd
-    endcase
-end
-
-// Row 2 — main<->audio-CPU SOUND handshake probe (decocass.v:331 warns the main "may
-// spin on sound handshake" if the ack flag never clears). Same colour key:
-//   0 GREEN   audio_alive  — audio 6502 address bus changing (it's actually running)
-//   1 CYAN    e414_we_ever — main wrote $E414 (sent a sound cmd -> sets ack D7, IRQs audio)
-//   2 BLUE    e701_rd_ever — main read $E701 (polling the sound-ack — THE spin)
-//   3 RED     e700_rd_ever — main read $E700 (sound response data)
-//   4 YELLOW  a000_re_ever — audio read $A000 (CONSUMED the cmd -> should clear ack D7)
-//   5 MAGENTA c000_we_ever — audio wrote $C000 (sent a response -> sets ack D6)
-//   6 ORANGE  airq_ever    — the sound IRQ to the audio CPU ever asserted
-//   7 WHITE   calibration
-// READ: cell0 black -> audio CPU dead (root). cell1 black -> main never sent a sound cmd
-//   => the spin is NOT the sound handshake (look at $E300/$E6xx/RAM). cell1+cell6 green
-//   but cell4 BLACK -> main sent cmd + IRQ fired, audio NEVER serviced it ($A000) -> ack
-//   D7 never clears -> main spins (THE bug; fix audio IRQ enable/handler). cell4 green
-//   but row-1 still black -> audio consumes but our $E701 ack-bit polarity is wrong.
-reg [7:0] cell2_r, cell2_g, cell2_b;
-always @(*) begin
-    cell2_r = 8'd0; cell2_g = 8'd0; cell2_b = 8'd0;
-    case (diag_cell)
-        // TAPE-DECK chain-of-custody (position = load-handshake order; read by POSITION, see HANDOFF)
-        3'd0: if (e5wr_ever)       begin cell2_g = 8'hFF; cell2_b = 8'hFF; end // 0 E5WR  BIOS wrote cmd
-        3'd1: if (ibf_ever)        cell2_b = 8'hFF;                            // 1 IBF   MCU got cmd
-        3'd2: if (tape_motor_ever) begin cell2_r = 8'hFF; cell2_g = 8'h80; end // 2 MOTOR spun tape
-        3'd3: if (rclk_ever)       cell2_g = 8'hFF;                            // 3 RCLK  deck clock
-        3'd4: if (rdata_ever)      begin cell2_r = 8'hFF; cell2_g = 8'hFF; end // 4 RDATA deck data
-        3'd5: if (obf_ever)        begin cell2_r = 8'hFF; cell2_b = 8'hFF; end // 5 OBF   MCU has byte
-        3'd6: if (req_ever)        cell2_r = 8'hFF;                            // 6 REQ   MCU signaled BIOS
-        3'd7: if (e5rd_ever)       begin cell2_r = 8'hFF; cell2_g = 8'hFF; cell2_b = 8'hFF; end // 7 E5RD BIOS read
-    endcase
-end
-
-// DIAG-2026-05-30 (PC-LATCH PROBE): capture the address the early spin loop POLLS.
-// In a stuck "LDA $XXXX / Bxx" loop, latch cpu_addr on any non-ROM DATA READ ($XXXX < $F000)
-// → last_rd settles to the polled peripheral/RAM address. Then disasm $Fxxx around it.
-// Shown in the BUS BAR band (vcnt 48..79, repurposed — it already proved "tight loop"):
-// 16 bit-cells, MSB at the LEFT. Cells 0..7 = HIGH byte (CYAN), cells 8..15 = LOW byte (YELLOW),
-// lit = 1. Read as two hex bytes: e.g. cyan 1110_0101 + yellow 0000_0010 = $E502.
-reg [15:0] last_rd;
-always @(posedge clk_sys) begin
-    if (reset)                                               last_rd <= 16'd0;
-    else if (ce_hclk4 && cpu_rw_n && (cpu_addr < 16'hF000))  last_rd <= cpu_addr;
-end
-wire [3:0] lrd_cell = hcnt[7:4];                  // 0..15 across the 256px band
-wire       lrd_bit  = last_rd[4'd15 - lrd_cell];  // MSB (bit15) at the left
-reg [7:0] lrd_r, lrd_g, lrd_b;
-// DIM-GRID 2026-05-30: every one of the 16 cells is shown DIM (you can't count black cells),
-// the actual bits are FULL bright. Dim shade alternates per nibble (cells 0-3 / 4-7 / 8-11 /
-// 12-15) so you can read it as 4 hex digits. Left 8 = CYAN high byte, right 8 = YELLOW low byte.
-wire [7:0] lrd_lvl = lrd_bit ? 8'hFF : (lrd_cell[2] ? 8'h30 : 8'h10);  // lit=full, else dim (nibble-alt)
-always @(*) begin
-    lrd_r = 8'd0; lrd_g = 8'd0; lrd_b = 8'd0;
-    if (lrd_cell < 4'd8) begin lrd_g = lrd_lvl; lrd_b = lrd_lvl; end // CYAN  = high byte [15:8]
-    else                 begin lrd_r = lrd_lvl; lrd_g = lrd_lvl; end // YELLOW = low byte  [7:0]
-end
-
-// Direct-colour bands bypass the palette entirely (status cells + CPU bus bar),
-// which doubles as the Kyugo "force-colour" output-path test: if even the WHITE
-// calibration cell is black, the bug is the pause->arcade_video->scaler path, not
-// the palette or renderer.
-wire       diag_direct = diag_status | diag_status2 | diag_busbar;
-// DIAG-2026-05-30: bus-bar band (else) now shows the LATCHED POLLED ADDRESS (last_rd) as
-// 16 bit-cells (was raw cpu_addr/cpu_dout). Restore = put cpu_addr[15:8]/[7:0]/cpu_dout back.
-wire [7:0] diag_r8 = diag_status ? cell_r : diag_status2 ? cell2_r : lrd_r;
-wire [7:0] diag_g8 = diag_status ? cell_g : diag_status2 ? cell2_g : lrd_g;
-wire [7:0] diag_b8 = diag_status ? cell_b : diag_status2 ? cell2_b : lrd_b;
-
-// Palette read index: forced to the swatch index inside the swatch band.
-wire [5:0] diag_pen = diag_swatch ? {1'b0, diag_swatch_index} : mixer_pen;
-
-// DIAG-REVERT-2026-05-29: original 3 core RGB assigns below, uncomment to restore
-// wire [7:0] core_r = {core_r_hi, core_r_hi};
-// wire [7:0] core_g = {core_g_hi, core_g_hi};
-// wire [7:0] core_b = {core_b_hi, core_b_hi};
-// DIAG OFF 2026-05-30 — overlay disabled to view the clean boot logo (the decrypt fix worked).
-// Re-arm: restore `diag_direct ? diag_r8/g8/b8 :` and `.pen(diag_pen)` below.
-// RE-ARMED 2026-05-30 for the TAPE-DECK chain overlay (row 2) + the bus-bar last_rd probe.
-// Swatch (.pen) stays OFF. Disable: set these back to just {core_*_hi, core_*_hi}.
-wire [7:0] core_r = diag_direct ? diag_r8 : {core_r_hi, core_r_hi};
-wire [7:0] core_g = diag_direct ? diag_g8 : {core_g_hi, core_g_hi};
-wire [7:0] core_b = diag_direct ? diag_b8 : {core_b_hi, core_b_hi};
-// DIAG-REVERT-2026-05-29: DECOCassette video-state overlay   <<< END DIAGNOSTIC <<<
-//========================================================================
+wire [7:0] core_r = {core_r_hi, core_r_hi};
+wire [7:0] core_g = {core_g_hi, core_g_hi};
+wire [7:0] core_b = {core_b_hi, core_b_hi};
 
 // Palette lookup (task 11)
 //
@@ -1422,9 +1191,7 @@ video_palette video_palette_inst (
 	.cpu_we       (cpu_we_palram),
 	.cpu_addr     ({3'b000, cpu_addr[4:0] ^ 5'b10000}),
 	.cpu_dout     (cpu_dout),
-	// DIAG OFF 2026-05-30: swatch disabled to view clean graphics. Re-arm: swap back to .pen(diag_pen).
 	.pen          (mixer_pen),
-	// .pen          (diag_pen),
 	.prom_index   (5'h00),
 	.red          (core_r_hi),
 	.grn          (core_g_hi),
@@ -1517,10 +1284,6 @@ assign AUDIO_S = 1'b1;
 // 2026-05-18 — LED_USER as tape-motor activity indicator. tape_motor_on is
 // asserted whenever MCU commands FWD or REW. Visible signal of whether the
 // MCU/tape interface is alive without staring at the screen.
-// DIAG-REVERT-2026-05-30: use the STICKY tape_motor_ever so a single motor pulse latches the LED
-// (definitive "did the MCU ever spin the tape?" probe for the Flying Ball test). Revert: restore
-// the live `tape_motor_on` line below.
-// assign LED_USER  = tape_motor_on;
-assign LED_USER  = tape_motor_ever;
+assign LED_USER  = tape_motor_on;
 
 endmodule
