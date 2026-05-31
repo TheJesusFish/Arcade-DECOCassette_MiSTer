@@ -1,6 +1,5 @@
 <p align="center">
-  <img src="Useful Information/Burger Time.png" width="800">
-  <img src="Useful Information/Lock n Chase.png" width="800">
+  <img src="Useful Information/DECO.png" width="800">
 </p>
 
 <h1 align="center">DECO Cassette FPGA Core</h1>

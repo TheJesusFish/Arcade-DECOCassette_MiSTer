@@ -265,6 +265,19 @@ module mcu_tape_iface (
     end
     wire       ce_hclk_rising = ce_hclk_r && !ce_hclk_rr;
 
+    // MAME-PARITY 2026-05-30: route the host strobe to the i8041 ONLY for $E5x0/$E5x1
+    // (offset bit1 == 0). MAME `decocass_e5xx_w` sends a 6502 write to `upi41_master_w`
+    // only when (offset & E5XX_MASK[0x02]) == 0; $E5x2/$E5x3 are STATUS/dongle space and
+    // must NOT reach the MCU. Likewise `decocass_e5xx_r` composes the STATUS byte at
+    // $E5x2/$E5x3 in software, and only the $E5x0/$E5x1 path returns the MCU DBBOUT.
+    // Before this gate, every BIOS status poll at $E5x2 strobed the MCU (clearing OBF /
+    // polluting a0_q in upi41_db_bus), and any write to $E5x2/$E5x3 was delivered to the
+    // MCU as a bogus command byte -> firmware reject at $0ED (cmd must be $25..$34) ->
+    // motor never commanded -> CASSETTE ERROR 59. (dongle_re/we below stay UNGATED — the
+    // dongle module does its own offset decode; cpu_din status mux is unchanged.)
+    wire e5_we_mcu = cpu_e5_we & ~cpu_addr_lo[1];
+    wire e5_re_mcu = cpu_e5_re & ~cpu_addr_lo[1];
+
     always @(posedge clk_sys or posedge reset) begin
         if (reset) begin
             pend_we <= 1'b0; pend_re <= 1'b0;
@@ -273,13 +286,15 @@ module mcu_tape_iface (
             cpu_addr_lo_lat <= 8'd0; cpu_dout_lat <= 8'd0;
         end else begin
             // Capture addr/data on the live CPU access strobe (valid this cycle).
-            if (cpu_e5_we) begin cpu_addr_lo_lat <= cpu_addr_lo; cpu_dout_lat <= cpu_dout; end
-            else if (cpu_e5_re) cpu_addr_lo_lat <= cpu_addr_lo;
+            // MAME-PARITY 2026-05-30: gated e5_we_mcu/e5_re_mcu (was cpu_e5_we/cpu_e5_re) so
+            // only $E5x0/$E5x1 reach the MCU; $E5x2/$E5x3 no longer strobe it.
+            if (e5_we_mcu) begin cpu_addr_lo_lat <= cpu_addr_lo; cpu_dout_lat <= cpu_dout; end
+            else if (e5_re_mcu) cpu_addr_lo_lat <= cpu_addr_lo;
 
             if (!hclk_strobe_active && ce_hclk_rising &&
-                (pend_we || cpu_e5_we || pend_re || cpu_e5_re)) begin
+                (pend_we || e5_we_mcu || pend_re || e5_re_mcu)) begin
                 hclk_strobe_cnt <= 2'd2;
-                if (pend_we || cpu_e5_we) begin       // write priority
+                if (pend_we || e5_we_mcu) begin       // write priority
                     strobe_is_we <= 1'b1; strobe_is_re <= 1'b0;
                     pend_we <= 1'b0;                  // a co-pending read stays queued
                 end else begin
@@ -287,8 +302,8 @@ module mcu_tape_iface (
                     pend_re <= 1'b0;
                 end
             end else begin
-                if (cpu_e5_we) pend_we <= 1'b1;
-                if (cpu_e5_re) pend_re <= 1'b1;
+                if (e5_we_mcu) pend_we <= 1'b1;
+                if (e5_re_mcu) pend_re <= 1'b1;
                 if (hclk_strobe_active && ce_hclk_rising)
                     hclk_strobe_cnt <= hclk_strobe_cnt - 2'd1;
             end
