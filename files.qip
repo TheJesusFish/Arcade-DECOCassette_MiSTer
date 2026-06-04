@@ -47,6 +47,11 @@ set_global_assignment -name VERILOG_FILE rtl/hiscore.v
 set_global_assignment -name VERILOG_FILE rtl/pause.v
 set_global_assignment -name VERILOG_FILE rtl/clock_div.v
 
+# Dedicated 8 MHz real clock for the 8041 MCU (copied from Arcade-JunoFirst sound PLL).
+# The T48 core needs clk_i to be a REAL clock (xtal_en='1'), not clk_sys+ce.
+set_global_assignment -name VERILOG_FILE rtl/pll/pll_sound.v
+set_global_assignment -name VERILOG_FILE rtl/pll/pll_sound_0002.v
+
 # Sound (phases 12-14)
 set_global_assignment -name VERILOG_FILE rtl/sound/audio_cpu.v
 set_global_assignment -name VERILOG_FILE rtl/sound/sound_latches.v

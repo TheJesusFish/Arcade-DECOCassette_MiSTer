@@ -75,5 +75,24 @@
         <part name="cflyball.cas" crc="cb40d043"/>
     </rom>
 
+    <!-- DIP switches per MAME cflyball: PORT_INCLUDE(decocass) for DSW1 (unchanged),
+         PORT_MODIFY DSW2 (Lives/Bonus/Push Backs). sw[2]=DSW1 (bits 16-23), sw[3]=DSW2 (24-31).
+         Defaults == MAME power-on: DSW1=0x3F, DSW2=0xFF.
+         BOOT-CRITICAL bit is DSW1 "Type of Tape" (bits 20,21, base decocass, "Used by the bios"):
+         MUST be "MD (Small)"(=3,0x30) or the BIOS ($F347) skips MCU priming -> CASSETTE ERROR 59.
+         The DSW2 fields below are gameplay options and do NOT affect the boot/handshake path. -->
+    <switches default="00,00,3F,FF" base="16">
+        <!-- DSW1 (base decocass) -->
+        <dip name="Coin A"       bits="16,17"    ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip name="Coin B"       bits="18,19"    ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip name="Type of Tape" bits="20,21"    ids="MT Big,inv,inv,MD Small"/>
+        <dip name="Cabinet"      bits="22"       ids="Upright,Cocktail"/>
+        <!-- DSW2 (cflyball PORT_MODIFY) -->
+        <dip name="Lives"        bits="24"       ids="5,3"/>
+        <dip name="Bonus Life"   bits="25,26"    ids="None,70000,50000,20000"/>
+        <dip name="Push Backs"   bits="27"       ids="3,2"/>
+        <dip name="Country Code" bits="29,30,31" ids="inv,inv,F,E,D,C,B,A"/>
+    </switches>
+
     <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
 </misterromdescription>

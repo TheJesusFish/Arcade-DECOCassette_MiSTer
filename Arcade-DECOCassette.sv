@@ -215,6 +215,8 @@ localparam CONF_STR = {
 	"O[1],Aspect ratio,3:4,Original;",
 	"O[2],Orientation,Vertical,Horizontal;",
 	"-;",
+	"DIP;",
+	"-;",
 	"R0,Reset;",
 	"J1,Button 1,Coin,Start 1P,Start 2P,Pause;",
 	"jn,A,Select,Start,R,L;",
@@ -239,6 +241,19 @@ pll pll
     .rst      (1'b0),
     .outclk_0 (clk_sys),
     .locked   (pll_locked)
+);
+
+// MCU-CLK-REALCLK-2026-06-04: dedicated REAL 8 MHz clock for the 8041 MCU, copied from
+// Arcade-JunoFirst's sound PLL (pll_sound: CLK_50M -> 8.000 MHz). The T48 core requires clk_i
+// to be a real clock (xtal_en='1'); clk_sys+ce_hclk broke its multi-cycle ADD carry (the 8041
+// range-rejected valid commands -> handshake never completed). The 8041 now runs in this domain.
+wire clk_8041;
+pll_sound pll_8041
+(
+    .refclk   (CLK_50M),
+    .rst      (1'b0),
+    .outclk_0 (clk_8041),
+    .locked   ()
 );
 
 // Alias for legacy port names in screen_rotate / arcade_video below:
@@ -661,7 +676,10 @@ decocass decocass_inst (
 	.tilram_q          (tilram_q),
 	.objram_q          (objram_q),
 	.palram_q          (palram_q),
-	.dsw1              (sw[2]),
+	// DIPDEFAULT-FORCE-2026-06-03: the MRA <switches> default isn't auto-loading sw[2], so
+	// force "Type of Tape" = MD(Small) (DSW1 bits 5,4 = 11) -> BIOS takes the priming path
+	// without an OSD set every boot. Only MD-Small boots; revert once the MRA default is fixed.
+	.dsw1              (sw[2] | 8'h30),
 	.dsw2              (sw[3]),
 	.vblank            (video_vblank),
 	.coin_in           (joystick_0[14] | joystick_1[14]),  // P1 or P2 coin → main-CPU NMI (MAME decocass_m.cpp:155-159)
@@ -717,9 +735,11 @@ wire [1:0]  tape_speed_select;
 wire        tape_data, tape_clock, tape_bot, tape_eot;
 
 // i8041 MCU + program memory
+wire [10:0] mcu_pmem_addr;   // DIAG-2026-06-03: 8041 program counter for the handshake probe
 i8041_top i8041_inst (
 	.clk_sys         (clk_sys),
 	.ce_hclk         (ce_hclk),
+	.clk_8041        (clk_8041),
 	.reset_n         (~reset),
 	.cs_n            (mcu_cs_n),
 	.rd_n            (mcu_rd_n),
@@ -742,7 +762,8 @@ i8041_top i8041_inst (
 	.prog_n          (),
 	.rom_we          (mcurom_we),
 	.rom_addr_w      (mcurom_addr),
-	.rom_data_w      (mcurom_dout)
+	.rom_data_w      (mcurom_dout),
+	.pmem_addr_o     (mcu_pmem_addr)
 );
 
 // MCU ↔ Tape ↔ Main CPU interface
@@ -1168,6 +1189,85 @@ wire [7:0] core_r = {core_r_hi, core_r_hi};
 wire [7:0] core_g = {core_g_hi, core_g_hi};
 wire [7:0] core_b = {core_b_hi, core_b_hi};
 
+// ===== DIAG-REVERT-2026-06-03e: 8041-PC + HANDSHAKE PROBE (delete this block + restore the
+//       pause .r/.g/.b ports below, AND the i8041_top pmem_addr_o port, to revert). PAST 59;
+//       the 8041 RECEIVES the cmd (cmd_seen+ibf) but never answers (obf/req dark). This shows
+//       the 8041's OWN program counter + execution milestones to split "MCU not running" vs
+//       "MCU running but mis-handling the command". mcu_pmem_addr = the 8041 pmem fetch addr.
+// THREE rows, 8 cells, 16px, leftmost cell = MSB / first milestone. white=1.
+//   ROW 1 (vcnt 16-31): 8041 PC low byte (mcu_pmem_addr[7:0]) -- FLICKERS if the MCU is running
+//   ROW 2 (vcnt 40-55): MCU milestones + PC high bits, cell0..7:
+//        0 $022(read cmd=executing) 1 $0ED(dispatch) 2 $0FB(range-passed/jmpp)
+//        3 $0F5(passed the FIRST jnc -> carry committed OK after add) 4 $2C8(OUT DBB)
+//        5 mcu_pc[8] 6 mcu_pc[9] 7 mcu_pc[10]
+//   KEY: cell3 ($0F5) DARK + cell1 ($0ED) lit = it bails at jnc@$0F3 = ADD did NOT commit carry
+//        (multi-cycle/clock timing). cell3 lit + cell2 ($0FB) dark = bails at jc@$0F8 instead.
+//   ROW 3 (vcnt 64-79): COMMAND BYTE the 8041 actually received (the value it range-checks).
+//        8 cells = 1 byte, MSB(bit7) leftmost. $33 = 0011 0011 EXPECTED; any other value = the
+//        host->8041 delivery is corrupting it (and we'll see exactly to-what).
+// READ: ROW1 flickering + ROW2 cell0 ($022) LIT = MCU executes (read the cmd) -> then the first
+//   DARK milestone (1..4) localizes the stall: $0ED dark=never dispatched; $0FB dark=cmd value
+//   REJECTED by the $25..$34 range check (delivery/value bug); $170/$2C8 dark=stalls inside the
+//   handler (tape sub-loop / bad opcode). ROW1 STABLE + $022 DARK = MCU frozen -> clock/en_clk.
+reg [10:0] diag_mcupc;
+reg [7:0]  diag_cmdval;   // byte the 8041 received on the last command write ($33 expected)
+reg diag_m022, diag_m0ed, diag_m0fb, diag_m170, diag_m2c8;
+reg diag_we501, diag_cmd_seen, diag_ibf, diag_obf, diag_req, diag_motor, diag_we500, diag_re502;
+always @(posedge clk_sys or posedge reset) begin
+    if (reset) begin
+        diag_mcupc <= 11'h000; diag_cmdval <= 8'h00;
+        diag_m022<=1'b0; diag_m0ed<=1'b0; diag_m0fb<=1'b0; diag_m170<=1'b0; diag_m2c8<=1'b0;
+        diag_we501<=1'b0; diag_cmd_seen<=1'b0; diag_ibf<=1'b0; diag_obf<=1'b0;
+        diag_req<=1'b0; diag_motor<=1'b0; diag_we500<=1'b0; diag_re502<=1'b0;
+    end else begin
+        diag_mcupc <= mcu_pmem_addr;                  // live 8041 PC
+        case (mcu_pmem_addr)                          // sticky MCU milestones
+            11'h022: diag_m022 <= 1'b1;
+            11'h0ED: diag_m0ed <= 1'b1;
+            11'h0FB: diag_m0fb <= 1'b1;
+            11'h0F5: diag_m170 <= 1'b1;   // repurposed: reached $0F5 = passed jnc@$0F3 (carry was 1 after add $DB)
+            11'h2C8: diag_m2c8 <= 1'b1;
+            default: ;
+        endcase
+        // 6502 / handshake side
+        if (cpu_we_e5xx && cpu_addr[7:0]==8'h01) diag_we501    <= 1'b1;
+        if (cpu_we_e5xx && cpu_addr[7:0]==8'h00) diag_we500    <= 1'b1;
+        if (cpu_re_e5xx && cpu_addr[7:0]==8'h02) diag_re502    <= 1'b1;
+        if (mcu_a0 && !mcu_wr_n) begin
+            diag_cmd_seen <= 1'b1;
+            if (!diag_cmd_seen) diag_cmdval <= mcu_host_din;  // capture the FIRST command ($33 expected)
+        end
+        if (mcu_host_sts[1])                     diag_ibf      <= 1'b1;
+        if (mcu_host_sts[0])                     diag_obf      <= 1'b1;
+        if (~mcu_p1_out[7])                      diag_req      <= 1'b1;   // REQ/ asserted (active-low)
+        if (tape_motor_on)                       diag_motor    <= 1'b1;
+    end
+end
+
+// ROW1 = 8041 PC low byte; ROW2 = milestones(cell0..4) + PC hi bits(5..7); ROW3 = command byte.
+wire [7:0] diag_hi  = {diag_mcupc[0], diag_mcupc[1], diag_mcupc[2], diag_mcupc[3],
+                       diag_mcupc[4], diag_mcupc[5], diag_mcupc[6], diag_mcupc[7]};
+wire [7:0] diag_lo  = {diag_mcupc[10],diag_mcupc[9], diag_mcupc[8], diag_m2c8,
+                       diag_m170,      diag_m0fb,     diag_m0ed,     diag_m022};
+wire [7:0] diag_chk = {diag_cmdval[0], diag_cmdval[1], diag_cmdval[2], diag_cmdval[3],
+                       diag_cmdval[4], diag_cmdval[5], diag_cmdval[6], diag_cmdval[7]};
+
+wire [8:0] diag_x    = hcnt - 9'd8;
+wire       diag_in   = (hcnt >= 9'd8) && (hcnt < 9'd136);   // 8 cells * 16px
+wire [2:0] diag_cell = diag_x[6:4];
+wire       diag_gap  = (diag_x[3:0] >= 4'd14);              // 2px gap between cells
+wire       diag_rowA = (vcnt >= 9'd16) && (vcnt < 9'd32);   // PC hi
+wire       diag_rowB = (vcnt >= 9'd40) && (vcnt < 9'd56);   // PC lo
+wire       diag_rowC = (vcnt >= 9'd64) && (vcnt < 9'd80);   // checkpoints
+wire       diag_lit  = (diag_rowA && diag_hi[diag_cell]) |
+                       (diag_rowB && diag_lo[diag_cell]) |
+                       (diag_rowC && diag_chk[diag_cell]);
+wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
+wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
+wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
+wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
+// ===== end DIAG-REVERT-2026-06-03c =====
+
 // Palette lookup (task 11)
 //
 // 2026-05-16: WHITE-SCREEN ROOT CAUSE.
@@ -1241,9 +1341,13 @@ pause #(8,8,8,24) pause_inst (
 	.user_button   (m_pause),
 	.pause_request (1'b0),
 	.options       (2'b00),
-	.r             (core_r),
-	.g             (core_g),
-	.b             (core_b),
+	// DIAG-REVERT-2026-06-03: feed MCU-progress overlay (restore core_* to revert)
+	// .r             (core_r),
+	// .g             (core_g),
+	// .b             (core_b),
+	.r             (diag_r),
+	.g             (diag_g),
+	.b             (diag_b),
 	.pause_cpu     (pause_cpu),
 	.rgb_out       (rgb_pause)
 );

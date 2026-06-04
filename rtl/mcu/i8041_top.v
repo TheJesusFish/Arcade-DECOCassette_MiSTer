@@ -32,8 +32,9 @@
 `timescale 1 ps / 1 ps
 
 module i8041_top (
-    input  wire        clk_sys,        // 48 MHz system clock
-    input  wire        ce_hclk,        // 6 MHz clock enable
+    input  wire        clk_sys,        // 96 MHz system clock (rom-load / host domain)
+    input  wire        ce_hclk,        // 6 MHz clock enable (legacy; unused after real-clock fix)
+    input  wire        clk_8041,       // MCU-CLK-REALCLK-2026-06-04: dedicated ~8 MHz REAL clock for the 8041
     input  wire        reset_n,        // active-low external reset
 
     // Host (main 6502) slave interface
@@ -65,7 +66,10 @@ module i8041_top (
     // Port B: read-only (upi41_core fetches instructions)
     input  wire        rom_we,         // BRAM write enable
     input  wire [9:0]  rom_addr_w,     // BRAM write address (A)
-    input  wire [7:0]  rom_data_w      // BRAM write data (A)
+    input  wire [7:0]  rom_data_w,     // BRAM write data (A)
+
+    // DIAG-2026-06-03: expose MCU program counter (pmem fetch addr) for the handshake probe
+    output wire [10:0] pmem_addr_o
 );
 
     //--------------------------------------------------------------------------
@@ -74,6 +78,13 @@ module i8041_top (
 
     wire [10:0] pmem_addr;    // Program memory address (11 bits in UPI41)
     wire [7:0]  pmem_data;    // Program memory data (8 bits read)
+    assign pmem_addr_o = pmem_addr;   // DIAG-2026-06-03: MCU PC out for probe
+
+    // MCU-CLK-FIX-2026-06-03: the core's XTAL/3 clock-enable output, fed back
+    // into en_clk_i (matches canonical t8041_notri.vhd: en_clk_i => xtal3_s;
+    // xtal3_o => xtal3_s). Keeps the machine-state FSM phase-locked to the
+    // XTAL sub-phases that place ALE/PSEN/RD/WR.
+    wire        mcu_xtal3;
 
     //--------------------------------------------------------------------------
     // Program Memory (dual-port BRAM)
@@ -82,10 +93,11 @@ module i8041_top (
     //--------------------------------------------------------------------------
 
     mcu_pmem u_pmem (
-        .clk        (clk_sys),
+        .clk_a      (clk_sys),      // Port A write: rom_loader (clk_sys)
         .we_a       (rom_we),
         .addr_a     (rom_addr_w),
         .din_a      (rom_data_w),
+        .clk_b      (clk_8041),     // Port B read: 8041 instruction fetch (real 8041 clock)
         .addr_b     (pmem_addr),
         .dout_b     (pmem_data)
     );
@@ -117,8 +129,11 @@ module i8041_top (
 
     upi41_core u_upi41 (
         // Clock & Reset
-        .xtal_i         (clk_sys),      // XTAL input (system clock)
-        .xtal_en_i      (ce_hclk),      // XTAL enable (6 MHz clock enable)
+        // MCU-CLK-REALCLK-2026-06-04: feed a REAL clock with xtal_en='1' (the canonical T48
+        // contract, matching Arcade-JunoFirst's working 8039). clk_sys+ce_hclk broke multi-cycle
+        // ADD carry (the 8041 range-rejected valid commands). Now clk_i==xtal_i==clk_8041.
+        .xtal_i         (clk_8041),     // REAL ~8 MHz clock (was clk_sys)
+        .xtal_en_i      (1'b1),         // always enabled (was ce_hclk)
         // DIAG-REVERT-2026-05-30: T48 res_active_c='0' => reset is ACTIVE-LOW. The ~ here held the
         // core in reset during NORMAL run (reset_n=1 -> ~reset_n=0 = res_active_c => permanent reset),
         // so ibf_q/status_q were frozen at 0 and the MCU never executed. Pass reset_n straight.
@@ -157,9 +172,18 @@ module i8041_top (
 
         // Core clock & enable (separate from xtal for flexibility)
         // Some designs use clk_i != xtal_i, but we tie them here
-        .clk_i          (clk_sys),      // Core clock
-        .en_clk_i       (ce_hclk),      // Core clock enable (6 MHz CE)
-        .xtal3_o        (),             // XTAL/3 output (unused)
+        .clk_i          (clk_8041),     // Core clock = REAL 8041 clock (was clk_sys)
+        // MCU-CLK-FIX-2026-06-03: en_clk_i was tied to ce_hclk (same net as
+        // xtal_en_i) with xtal3_o discarded. That ran the machine-state FSM at
+        // ce_hclk while the XTAL-phase / ALE / RD / WR logic ran at ce_hclk/3 —
+        // 3x desync, so the MCU executed but garbled instruction sequencing
+        // (dispatch at $0ED / jmpp never reached OUT DBB -> CASSETTE ERROR 59).
+        // Feed the core's own XTAL/3 output back in, per canonical t8041_notri.
+        // TO REVERT: restore the two ORIGINAL lines below and delete the FIXED pair.
+        // .en_clk_i       (ce_hclk),      // ORIGINAL (WRONG)
+        // .xtal3_o        (),             // ORIGINAL (WRONG: xtal3 discarded)
+        .en_clk_i       (mcu_xtal3),    // FIXED: en_clk = core's XTAL/3 enable
+        .xtal3_o        (mcu_xtal3),    // FIXED: feedback loop (== canonical)
 
         // Program memory interface (connects to mcu_pmem)
         .pmem_addr_o    (pmem_addr),    // 11-bit address (i8041 is 2K max; we use 10 bits)

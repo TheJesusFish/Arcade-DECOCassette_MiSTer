@@ -112,7 +112,14 @@ module rom_loader (
         palprom_we    <= 1'b0;
         dongleprom_we <= 1'b0;
 
-        if (ioctl_download && ioctl_wr) begin
+        // ROM-LOADER-IOCTL-FIX-2026-06-03: gate on ioctl_index==0 (the MRA <rom index="0">
+        // stream). WITHOUT this, the DIP-switch download (ioctl_index==254, addr 0..7) was
+        // routed by address into sel_bios and OVERWROTE BIOS $F000..$F003 (the reset JMP
+        // table) with the DIP default bytes -> 6502 crashed/looped at $F00A. The DIP page
+        // only appeared once an MRA <switches> block existed, which is exactly when booting
+        // "broke." sw[] still loads via its own index==254 gate in the wrapper.
+        // ORIGINAL (buggy): if (ioctl_download && ioctl_wr) begin
+        if (ioctl_download && ioctl_wr && ioctl_index == 8'd0) begin
             if (sel_bios) begin
                 // Main BIOS: route to BIOS BRAM
                 bios_we    <= 1'b1;
