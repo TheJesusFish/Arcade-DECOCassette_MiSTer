@@ -1196,27 +1196,26 @@ wire [7:0] core_b = {core_b_hi, core_b_hi};
 //       "MCU running but mis-handling the command". mcu_pmem_addr = the 8041 pmem fetch addr.
 // THREE rows, 8 cells, 16px, leftmost cell = MSB / first milestone. white=1.
 //   ROW 1 (vcnt 16-31): 8041 PC low byte (mcu_pmem_addr[7:0]) -- FLICKERS if the MCU is running
-//   ROW 2 (vcnt 40-55): MCU milestones + PC high bits, cell0..7:
-//        0 $022(read cmd=executing) 1 $0ED(dispatch) 2 $0FB(range-passed/jmpp)
-//        3 $0F5(passed the FIRST jnc -> carry committed OK after add) 4 $2C8(OUT DBB)
-//        5 mcu_pc[8] 6 mcu_pc[9] 7 mcu_pc[10]
-//   KEY: cell3 ($0F5) DARK + cell1 ($0ED) lit = it bails at jnc@$0F3 = ADD did NOT commit carry
-//        (multi-cycle/clock timing). cell3 lit + cell2 ($0FB) dark = bails at jc@$0F8 instead.
-//   ROW 3 (vcnt 64-79): COMMAND BYTE the 8041 actually received (the value it range-checks).
-//        8 cells = 1 byte, MSB(bit7) leftmost. $33 = 0011 0011 EXPECTED; any other value = the
-//        host->8041 delivery is corrupting it (and we'll see exactly to-what).
-// READ: ROW1 flickering + ROW2 cell0 ($022) LIT = MCU executes (read the cmd) -> then the first
-//   DARK milestone (1..4) localizes the stall: $0ED dark=never dispatched; $0FB dark=cmd value
-//   REJECTED by the $25..$34 range check (delivery/value bug); $170/$2C8 dark=stalls inside the
-//   handler (tape sub-loop / bad opcode). ROW1 STABLE + $022 DARK = MCU frozen -> clock/en_clk.
+//   ROW 2 (vcnt 40-55): MCU execution milestones, cell0..7 (left->right = program flow):
+//        0 $022(read cmd) 1 $0ED(EN I / dispatch entry) 2 $0F3(reached the jnc)
+//        3 $0F5(jnc did NOT branch => carry=1) 4 $0FB(passed both checks => jmpp/dispatch)
+//        5 $003(IBF INTERRUPT vector => EN I diverted) 6 mcu_pc[9] 7 mcu_pc[10]
+//   DISAMBIGUATION (why is $0F5 dark?): TWO causes, OPPOSITE fixes --
+//     (A) CARRY-BAIL: cell2 ($0F3) LIT + cell3 ($0F5) DARK + cell5 ($003) DARK
+//         => reached the jnc, it branched to $017 => add a,#$DB gave carry=0. ALU/internal-fetch bug.
+//     (B) INTERRUPT-DIVERT: cell5 ($003) LIT => the IBF interrupt fired after EN I@$0ED and vectored
+//         to $003 before the check finished. Interrupt path / int.vhd ALE-edge timing.
+//   ROW 3 (vcnt 64-79): COMMAND BYTE the 8041 received. MSB(bit7) leftmost. $33 expected.
+// READ: ROW1 flickering + cell0 ($022) LIT = MCU executing. Then read cell5 ($003) FIRST:
+//   lit = interrupt-divert (B); dark + cell2($0F3) lit + cell3($0F5) dark = carry-bail (A).
 reg [10:0] diag_mcupc;
 reg [7:0]  diag_cmdval;   // byte the 8041 received on the last command write ($33 expected)
-reg diag_m022, diag_m0ed, diag_m0fb, diag_m170, diag_m2c8;
+reg diag_m022, diag_m0ed, diag_m0fb, diag_m170, diag_m0f3, diag_m003;
 reg diag_we501, diag_cmd_seen, diag_ibf, diag_obf, diag_req, diag_motor, diag_we500, diag_re502;
 always @(posedge clk_sys or posedge reset) begin
     if (reset) begin
         diag_mcupc <= 11'h000; diag_cmdval <= 8'h00;
-        diag_m022<=1'b0; diag_m0ed<=1'b0; diag_m0fb<=1'b0; diag_m170<=1'b0; diag_m2c8<=1'b0;
+        diag_m022<=1'b0; diag_m0ed<=1'b0; diag_m0fb<=1'b0; diag_m170<=1'b0; diag_m0f3<=1'b0; diag_m003<=1'b0;
         diag_we501<=1'b0; diag_cmd_seen<=1'b0; diag_ibf<=1'b0; diag_obf<=1'b0;
         diag_req<=1'b0; diag_motor<=1'b0; diag_we500<=1'b0; diag_re502<=1'b0;
     end else begin
@@ -1225,8 +1224,9 @@ always @(posedge clk_sys or posedge reset) begin
             11'h022: diag_m022 <= 1'b1;
             11'h0ED: diag_m0ed <= 1'b1;
             11'h0FB: diag_m0fb <= 1'b1;
-            11'h0F5: diag_m170 <= 1'b1;   // repurposed: reached $0F5 = passed jnc@$0F3 (carry was 1 after add $DB)
-            11'h2C8: diag_m2c8 <= 1'b1;
+            11'h0F3: diag_m0f3 <= 1'b1;   // reached the jnc@$0F3 (so the add executed; no interrupt-divert before it)
+            11'h0F5: diag_m170 <= 1'b1;   // reached $0F5 = jnc did NOT branch => carry was 1 after add $DB
+            11'h003: diag_m003 <= 1'b1;   // IBF interrupt vector => the EN-I@$0ED interrupt DIVERTED the dispatch
             default: ;
         endcase
         // 6502 / handshake side
@@ -1247,8 +1247,8 @@ end
 // ROW1 = 8041 PC low byte; ROW2 = milestones(cell0..4) + PC hi bits(5..7); ROW3 = command byte.
 wire [7:0] diag_hi  = {diag_mcupc[0], diag_mcupc[1], diag_mcupc[2], diag_mcupc[3],
                        diag_mcupc[4], diag_mcupc[5], diag_mcupc[6], diag_mcupc[7]};
-wire [7:0] diag_lo  = {diag_mcupc[10],diag_mcupc[9], diag_mcupc[8], diag_m2c8,
-                       diag_m170,      diag_m0fb,     diag_m0ed,     diag_m022};
+wire [7:0] diag_lo  = {diag_mcupc[10],diag_mcupc[9], diag_m003,     diag_m0fb,
+                       diag_m170,      diag_m0f3,     diag_m0ed,     diag_m022};
 wire [7:0] diag_chk = {diag_cmdval[0], diag_cmdval[1], diag_cmdval[2], diag_cmdval[3],
                        diag_cmdval[4], diag_cmdval[5], diag_cmdval[6], diag_cmdval[7]};
 

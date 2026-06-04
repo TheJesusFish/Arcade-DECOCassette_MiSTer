@@ -216,6 +216,14 @@ begin
           obf_q    <= '1';
         elsif read_bus_i then
           ibf_q    <= '0';
+          -- IBF-INT-ACK-FIX-2026-06-04: reading DBB (in a,dbb) must ALSO de-assert the IBF
+          -- interrupt request. MAME mcs48.cpp in_a_dbb: "acknowledge the IBF IRQ and clear the
+          -- bit in STS"; the IBF interrupt is LEVEL-sensitive on STS_IBF (mcs48.cpp:1299).
+          -- Without this, int_n_o stayed latched '0' after the main loop's POLLING read at $022,
+          -- so EN I@$0ED fired a SPURIOUS IBF interrupt -> vectored to $003 -> the cassette-cmd
+          -- dispatch ($0F1 range-check / $0FB jmpp) never ran. (DECO-only file; no JunoFirst
+          -- equivalent existed to diff against, which is why this survived every prior compare.)
+          int_n_o  <= '1';
         elsif write_sts_i then
           sts_q    <= data_i(7 downto 4);
         end if;
