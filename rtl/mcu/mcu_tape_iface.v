@@ -126,10 +126,30 @@ module mcu_tape_iface (
     // Decode P1 outputs into tape control. NOTE: MCU writes inverted-active
     // signals (a 0 = "asserted") per LOG comments above.
     wire fast_active = ~mcu_p1_out[2];
-    wire rew_active  = ~mcu_p1_out[4];
-    wire fwd_active  = ~mcu_p1_out[5];
+    // TAPE-DIR-2026-06-04: a MAME-LITERAL swap (rew=~P1.5, fwd=P1.5&~P1.4, from i8041_p1_w where
+    // bit5=0 => NEGATIVE speed) was TRIED and REVERTED — it REGRESSED on FPGA: with the ORIGINAL
+    // decode the tape reads blocks (counter 999->998, then ERROR #1); with the swap it reads
+    // NOTHING (deck looks dead, ERROR #52, counter never gets a value). Why the original is right:
+    // the 8041 syncs on the block HEADER (0xAA), which is at the START of a block, so it must see
+    // header-then-data = FORWARD streaming (clockpos increasing). Original `fwd=~P1.5` makes
+    // read_block's P1.5=0 => forward => correct order. MAME's bit5=0=>negative is a DIFFERENT
+    // physical convention (reads while rewinding) that does NOT map onto this streamer's clockpos
+    // layout. So ERROR #1's cause is NOT direction — it's downstream (speed/bit-timing on a block
+    // that IS being read forward; the count stays at the 999 default => the header data is garbage).
+    // DIRECTION: tested MAME-literal (rew=~P1.5/fwd=P1.5&~P1.4) WITH the probe 2026-06-04 →
+    // MEASURABLY WORSE: tape ran to the clockpos-0 wall, read_block never dispatched ($2E8 dark),
+    // nothing delivered (ROW2/3 = $00), BOT-now lit. It breaks positioning (rewind/seek spools the
+    // wrong way) AND reading. The ORIGINAL forward decode drives the tape INTO the data region
+    // (RCLK@read lit, $05 delivered), so forward is empirically correct for THIS streamer's layout,
+    // even though it diverges from MAME's bit5-sign. (Why MAME's negative-speed read works in MAME
+    // but not ported = unresolved; not the bug to chase — the $05 garbage on a FORWARD read is.)
+    // MAME-literal kept for reference (do NOT re-enable — proven worse):
+    // wire rew_active  = ~mcu_p1_out[5];
+    // wire fwd_active  =  mcu_p1_out[5] & ~mcu_p1_out[4];
+    wire rew_active  = ~mcu_p1_out[4];   // ORIGINAL (restored): forward read reaches the data
+    wire fwd_active  = ~mcu_p1_out[5];   // ORIGINAL (restored): P1.5=0 => forward
 
-    assign tape_motor_on     = fwd_active | rew_active;
+    assign tape_motor_on     = fwd_active | rew_active;   // ~P1.5 | ~P1.4
     assign tape_direction    = fwd_active;       // 1 = forward, 0 = rewind
     // FIX 2026-05-30: speed_select now encodes MAGNITUDE only (direction is tape_direction above);
     // 00=stop, 01=normal(1x), 10=fast(7x) — matches MAME |speed| 0/1/7. Was 11=rewind (direction
@@ -390,17 +410,21 @@ module mcu_tape_iface (
     // mcu_host_dout already carries DBBOUT (for $E5x0 reads) or DBBSTS
     // (for $E5x1 reads) based on mcu_a0 = cpu_addr_lo_lat[0]. We just
     // latch whichever register the i8041 presented during the bus stretch.
-    reg [7:0] latched_host_dout;
-    always @(posedge clk_sys or posedge reset) begin
-        if (reset)
-            latched_host_dout <= 8'h00;
-        else if (mcu_host_dout_oe)
-            latched_host_dout <= mcu_host_dout;
-    end
-
-    assign cpu_din = e5xx_is_status
-                     ? e5xx_status_byte
-                     : latched_host_dout;
+    // DBBOUT-LIVE-FIX-2026-06-04: $E500 (tape DATA) was returning a STALE LATCHED byte. The latch
+    // captured mcu_host_dout on EVERY $E5xx read strobe (mcu_host_dout_oe), so the read driver's
+    // `bit $e501` (DBBSTS) just before `lda $e500` left DBBSTS latched ($05 = OBF+F0), and $E500
+    // handed back that STATUS byte instead of the tape DATA → constant $05 every byte, independent
+    // of tape content (explains why a bit-shift changed nothing). MAME `decocass_e5xx_r` returns
+    // DBBOUT LIVE (m_dongle_r, no latch). mcu_host_dout already carries the correct register live
+    // (dbbout_q for a0=0 = $E5x0, status_q for a0=1 = $E5x1), so return it directly.
+    // ORIGINAL (stale-latch bug):
+    // reg [7:0] latched_host_dout;
+    // always @(posedge clk_sys or posedge reset) begin
+    //     if (reset)                 latched_host_dout <= 8'h00;
+    //     else if (mcu_host_dout_oe) latched_host_dout <= mcu_host_dout;
+    // end
+    // assign cpu_din = e5xx_is_status ? e5xx_status_byte : latched_host_dout;
+    assign cpu_din = e5xx_is_status ? e5xx_status_byte : mcu_host_dout;   // FIXED: live DBBOUT
 
     //------------------------------------------------------------------------
     // Summary of TODO items

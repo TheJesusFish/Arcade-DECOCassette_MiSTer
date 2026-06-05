@@ -10,6 +10,10 @@
   Writes (rom_loader) stay on clk_sys; they only happen during ioctl_download
   (8041 held in reset), so the two ports never collide.
 
+  REALCLK-REVERT-2026-06-04: REVERTED — the i8041_top instance now feeds clk_b=clk_sys
+  again (8041 back on clk_sys, no host-bus CDC). This module is domain-agnostic (clk_b
+  is just a port), so nothing changes here; both ports are once more on clk_sys.
+
   i8041 ROM size: 1024 bytes (10-bit address)
   ============================================================================*/
 

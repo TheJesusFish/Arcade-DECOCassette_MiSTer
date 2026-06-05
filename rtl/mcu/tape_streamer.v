@@ -162,9 +162,18 @@ module tape_streamer (
     // Region detection (mirrors MAME lines 232-275)
     // =====================================================================
 
-    wire [31:0] trailer_start = total_clocks - REGION_BOT_GAP_END;
-    wire [31:0] eot_gap_start = total_clocks - REGION_BOT_END;
-    wire [31:0] eot_start = total_clocks - BOT_CLOCKS;
+    // TAPE-EOT-FIX-2026-06-04: trailer/EOT region detection was broken — wrong start
+    // constants + logically-impossible in_eot/in_eot_gap ranges (always false), so
+    // tape_eot NEVER asserted and in_trailer spanned the whole trailing 13452 clocks.
+    // Ported MAME's symmetric end-of-tape boundaries (decocass_tape.cpp:251-258),
+    // measured DOWN from total_clocks (mirror of the leader side). ORIGINAL (WRONG):
+    // wire [31:0] trailer_start = total_clocks - REGION_BOT_GAP_END;
+    // wire [31:0] eot_gap_start = total_clocks - REGION_BOT_END;
+    // wire [31:0] eot_start = total_clocks - BOT_CLOCKS;
+    wire [31:0] eot_gap_start     = total_clocks - REGION_BOT_GAP_END;     // total - 13452
+    wire [31:0] eot_start         = total_clocks - REGION_BOT_END;         // total - 12012
+    wire [31:0] trailer_gap_start = total_clocks - REGION_LEADER_GAP_END;  // total - 12000
+    wire [31:0] trailer_start     = total_clocks - REGION_LEADER_END;      // total - 4800
 
     wire in_leader     = (clockpos < REGION_LEADER_END);
     wire in_leader_gap = (clockpos >= REGION_LEADER_END &&
@@ -174,12 +183,18 @@ module tape_streamer (
     wire in_bot_gap    = (clockpos >= REGION_BOT_END &&
                          clockpos < REGION_BOT_GAP_END);
 
+    // TAPE-EOT-FIX-2026-06-04: mirror of the leader side, measured down from total_clocks
+    // (MAME decocass_tape.cpp:251-258). ORIGINAL (WRONG — in_eot/in_eot_gap never true):
+    // wire in_trailer     = (clockpos >= trailer_start);
+    // wire in_eot_gap     = (clockpos >= eot_gap_start && clockpos < trailer_start);
+    // wire in_eot         = (clockpos >= eot_start && clockpos < eot_gap_start);
+    wire in_eot_gap     = (clockpos >= eot_gap_start     && clockpos < eot_start);
+    wire in_eot         = (clockpos >= eot_start         && clockpos < trailer_gap_start);
+    wire in_trailer_gap = (clockpos >= trailer_gap_start && clockpos < trailer_start);
     wire in_trailer     = (clockpos >= trailer_start);
-    wire in_eot_gap     = (clockpos >= eot_gap_start && clockpos < trailer_start);
-    wire in_eot         = (clockpos >= eot_start && clockpos < eot_gap_start);
 
     wire in_data        = !in_leader && !in_leader_gap && !in_bot && !in_bot_gap &&
-                         !in_trailer && !in_eot_gap && !in_eot;
+                         !in_trailer && !in_trailer_gap && !in_eot_gap && !in_eot;
 
     // =====================================================================
     // Image read address (combinational, no buffering)
@@ -213,10 +228,28 @@ module tape_streamer (
         8'h00;
 
     // =====================================================================
-    // Output: tape_data (serial, MSB-first per MAME line 334)
+    // Output: tape_data (serial, LSB-first — current_byte[0] = LSB streamed first)
     // =====================================================================
-
-    assign tape_data = current_byte[bit_offset];
+    // RDATA-PHASE-FIX-2026-06-04: the MCU read loop (mcu.dasm $1A7) EDGE-SYNCS to RCLK (P2.6:
+    // spins for a falling edge, then a rising edge) and samples RDATA (P2.7) just AFTER the rising
+    // edge. Our RCLK and the old combinational RDATA both transitioned on the SAME (even) clockpos,
+    // so RDATA was changing at the exact edge the MCU samples => setup/hold race => garbage bits
+    // (block count stuck at default => ERROR #1). MAME never sees this (lockstep functional model,
+    // no async sampling). FIX: register RDATA on ce_tape so it transitions on the RCLK FALLING edge
+    // (odd clockpos) — stable, with ~half a tape-clock of setup before the rising edge the MCU
+    // triggers on (also aligns the MCU's first caught edge to bit0, not bit1). RCLK unchanged
+    // (still MAME-faithful).
+    // REVERTED 2026-06-04: the registered delay below did NOT fix the read (count still stuck at
+    // 999) and may have regressed it. The exact RCLK edge the MCU samples RDATA on is UNKNOWN ($1A7
+    // edge-sync and the jb7 samples are in separate routines), so the delay direction was a guess.
+    // Back to combinational while we MEASURE the read pipeline (READ-PIPELINE-PROBE in Arcade-*.sv).
+    // To re-apply: restore the 4 reg/always/assign lines, comment the combinational assign.
+    // reg tape_data_r;
+    // always @(posedge clk_sys)
+    //     if (reset)        tape_data_r <= 1'b0;
+    //     else if (ce_tape) tape_data_r <= current_byte[bit_offset];
+    // assign tape_data = tape_data_r;
+    assign tape_data = current_byte[bit_offset];   // ORIGINAL (restored)
 
     // =====================================================================
     // Output: tape_clock (active high during clocked regions, MAME line 304-315)
@@ -240,9 +273,14 @@ module tape_streamer (
     // Mirrors MAME get_status_bits() lines 292-294
     // =====================================================================
 
-    assign tape_bot = in_leader || in_bot || in_eot || in_trailer;
-
-    assign tape_eot = in_eot_gap || in_eot;
+    // TAPE-EOT-FIX-2026-06-04: MAME sets the 0x20 hole-sense in LEADER|BOT|EOT|TRAILER
+    // (get_status_bits, decocass_tape.cpp:293). Only the COMBINED tape_bot|tape_eot is
+    // consumed (mcu_tape_iface bot_eot / $E502 D4), so split start-side vs end-side.
+    // ORIGINAL (tape_eot used always-false in_eot_gap/in_eot => never asserted):
+    // assign tape_bot = in_leader || in_bot || in_eot || in_trailer;
+    // assign tape_eot = in_eot_gap || in_eot;
+    assign tape_bot = in_leader || in_bot;       // start-side holes
+    assign tape_eot = in_eot    || in_trailer;   // end-side holes (combined = MAME 0x20)
 
     // CRC table is populated externally by cassette_loader.
 

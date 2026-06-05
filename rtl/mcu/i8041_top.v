@@ -33,8 +33,8 @@
 
 module i8041_top (
     input  wire        clk_sys,        // 96 MHz system clock (rom-load / host domain)
-    input  wire        ce_hclk,        // 6 MHz clock enable (legacy; unused after real-clock fix)
-    input  wire        clk_8041,       // MCU-CLK-REALCLK-2026-06-04: dedicated ~8 MHz REAL clock for the 8041
+    input  wire        ce_hclk,        // 6 MHz clock enable (xtal_en_i again after REALCLK-REVERT-2026-06-04)
+    input  wire        clk_8041,       // MCU-CLK-REALCLK-2026-06-04: dedicated ~8 MHz REAL clock; UNUSED after REALCLK-REVERT (kept for easy re-apply)
     input  wire        reset_n,        // active-low external reset
 
     // Host (main 6502) slave interface
@@ -80,6 +80,17 @@ module i8041_top (
     wire [7:0]  pmem_data;    // Program memory data (8 bits read)
     assign pmem_addr_o = pmem_addr;   // DIAG-2026-06-03: MCU PC out for probe
 
+    // DMEM-RAM-FIX-2026-06-04: the T48 core has NO internal data RAM — t48_dmem_ctrl only
+    // computes addresses and passes data through (data_o <= dmem_data_i). The 64-byte 8041
+    // register/scratch/stack RAM is EXTERNAL (canonical t8041_notri instantiates generic_ram_ena).
+    // DECO previously tied dmem_data_i=0 => EVERY RAM read returned 0 => `mov r0,a`/`mov a,r0` in the
+    // command dispatch ($0EF/$0FA) made A=0 at `jmpp @a` ($0FB), so every command jumped to mem[$00]
+    // instead of its handler (no REQ/motor/OUT-DBB ever). These wires + u_dmem below restore the RAM.
+    wire [7:0]  dmem_addr;    // Data memory address (core drives 8 bits; I8041A RAM = 128B => use [6:0])
+    wire [7:0]  dmem_din;     // Data to RAM   (core dmem_data_o)
+    wire [7:0]  dmem_dout;    // Data from RAM (core dmem_data_i)
+    wire        dmem_we;      // RAM write enable (core dmem_we_o)
+
     // MCU-CLK-FIX-2026-06-03: the core's XTAL/3 clock-enable output, fed back
     // into en_clk_i (matches canonical t8041_notri.vhd: en_clk_i => xtal3_s;
     // xtal3_o => xtal3_s). Keeps the machine-state FSM phase-locked to the
@@ -97,10 +108,33 @@ module i8041_top (
         .we_a       (rom_we),
         .addr_a     (rom_addr_w),
         .din_a      (rom_data_w),
-        .clk_b      (clk_8041),     // Port B read: 8041 instruction fetch (real 8041 clock)
+        // REALCLK-REVERT-2026-06-04: Port B back to clk_sys (synchronous host bus, no CDC).
+        // To re-apply the real clock, restore the clk_8041 line and comment the clk_sys line.
+        // .clk_b      (clk_8041),     // REALCLK: Port B read on real 8041 clock
+        .clk_b      (clk_sys),      // REVERTED: Port B read on clk_sys (same domain as Port A)
         .addr_b     (pmem_addr),
         .dout_b     (pmem_data)
     );
+
+    //--------------------------------------------------------------------------
+    // DMEM-RAM-FIX-2026-06-04: 8041 internal Data RAM (64 bytes) — the piece DECO
+    // omitted. Mirrors the canonical t8041_notri's generic_ram_ena: synchronous,
+    // registered-address read, clocked on the fast clock (clk_sys, same domain as
+    // mcu_pmem and the core's clk_i after REALCLK-REVERT). ena='1' (always), so it
+    // registers the address every clk_sys edge; the 1-cycle read latency is absorbed
+    // by the core reading dmem_data_i on the slower en_clk (xtal3) mstates.
+    //--------------------------------------------------------------------------
+    // DMEM-RAM-128-2026-06-04: the DECO MCU is an I8041A (decocass.cpp:1025) = 128 bytes of internal
+    // RAM, NOT 64. Was 64 (dmem_addr[5:0]) — any RAM access at 64-127 truncated/WRAPPED to 0-63,
+    // corrupting the registers/stack and sending the tape data loop down its error branches
+    // ($329/$33E) so it never sent a byte ($2C8 dark). Full 128 bytes, addr[6:0].
+    reg  [7:0] dmem_mem [0:127];
+    reg  [6:0] dmem_a_q;
+    always @(posedge clk_sys) begin
+        if (dmem_we) dmem_mem[dmem_addr[6:0]] <= dmem_din;
+        dmem_a_q <= dmem_addr[6:0];
+    end
+    assign dmem_dout = dmem_mem[dmem_a_q];
 
     //--------------------------------------------------------------------------
     // UPI41 Core Instantiation
@@ -132,8 +166,17 @@ module i8041_top (
         // MCU-CLK-REALCLK-2026-06-04: feed a REAL clock with xtal_en='1' (the canonical T48
         // contract, matching Arcade-JunoFirst's working 8039). clk_sys+ce_hclk broke multi-cycle
         // ADD carry (the 8041 range-rejected valid commands). Now clk_i==xtal_i==clk_8041.
-        .xtal_i         (clk_8041),     // REAL ~8 MHz clock (was clk_sys)
-        .xtal_en_i      (1'b1),         // always enabled (was ce_hclk)
+        //
+        // REALCLK-REVERT-2026-06-04: REVERTED — 8041 back on clk_sys+ce_hclk, synchronous with the
+        // 6502 so upi41_db_bus (which samples the 6502's cs_n/wr_n/a0/db_i) has NO host-bus CDC.
+        // IBF-INT-ACK (in upi41_db_bus.vhd), NOT the clock, is what fixed dispatch — the "carry bug"
+        // was a red herring — so the real-clock domain was pure liability for the host bus. KEEP the
+        // en_clk<-xtal3 fix (MCU-CLK-FIX-2026-06-03) below. To re-apply the real clock, restore the
+        // two clk_8041/1'b1 lines and comment the two clk_sys/ce_hclk lines (also clk_i + pmem clk_b).
+        // .xtal_i         (clk_8041),     // REALCLK: real ~8 MHz clock
+        // .xtal_en_i      (1'b1),         // REALCLK: always enabled
+        .xtal_i         (clk_sys),      // REVERTED: was clk_sys
+        .xtal_en_i      (ce_hclk),      // REVERTED: was ce_hclk
         // DIAG-REVERT-2026-05-30: T48 res_active_c='0' => reset is ACTIVE-LOW. The ~ here held the
         // core in reset during NORMAL run (reset_n=1 -> ~reset_n=0 = res_active_c => permanent reset),
         // so ibf_q/status_q were frozen at 0 and the MCU never executed. Pass reset_n straight.
@@ -172,7 +215,9 @@ module i8041_top (
 
         // Core clock & enable (separate from xtal for flexibility)
         // Some designs use clk_i != xtal_i, but we tie them here
-        .clk_i          (clk_8041),     // Core clock = REAL 8041 clock (was clk_sys)
+        // REALCLK-REVERT-2026-06-04: core clock back to clk_sys (see xtal_i note above).
+        // .clk_i          (clk_8041),     // REALCLK: core clock = real 8041 clock
+        .clk_i          (clk_sys),      // REVERTED: was clk_sys
         // MCU-CLK-FIX-2026-06-03: en_clk_i was tied to ce_hclk (same net as
         // xtal_en_i) with xtal3_o discarded. That ran the machine-state FSM at
         // ce_hclk while the XTAL-phase / ALE / RD / WR logic ran at ce_hclk/3 —
@@ -189,12 +234,18 @@ module i8041_top (
         .pmem_addr_o    (pmem_addr),    // 11-bit address (i8041 is 2K max; we use 10 bits)
         .pmem_data_i    (pmem_data),    // 8-bit instruction data
 
-        // Data memory interface (unused; i8041 has internal 64 bytes only)
-        // dmem accesses are handled internally; we don't provide external SRAM
-        .dmem_addr_o    (),             // Data memory address (not used)
-        .dmem_we_o      (),             // Data memory write enable (not used)
-        .dmem_data_i    (8'h00),        // Data memory read data (tie to 0; internal RAM only)
-        .dmem_data_o    (),             // Data memory write data (not used)
+        // DMEM-RAM-FIX-2026-06-04: connect the core's data-memory bus to the new 64-byte
+        // u_dmem RAM above. The old tie-offs (commented) WERE the bug: the T48 core has no
+        // internal RAM, so dmem_data_i=0 blanked every register/scratch/stack read.
+        // ORIGINAL (WRONG — no RAM, all reads = 0):
+        // .dmem_addr_o    (),
+        // .dmem_we_o      (),
+        // .dmem_data_i    (8'h00),
+        // .dmem_data_o    (),
+        .dmem_addr_o    (dmem_addr),    // FIXED: RAM address (8 bits; RAM uses [5:0])
+        .dmem_we_o      (dmem_we),      // FIXED: RAM write enable
+        .dmem_data_i    (dmem_dout),    // FIXED: RAM read data (was tied 0 = the bug)
+        .dmem_data_o    (dmem_din),     // FIXED: RAM write data
 
         // Generics (via port-map default)
         // .xtal_div_3_g => 1,

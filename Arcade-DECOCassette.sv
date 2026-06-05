@@ -1195,29 +1195,60 @@ wire [7:0] core_b = {core_b_hi, core_b_hi};
 //       the 8041's OWN program counter + execution milestones to split "MCU not running" vs
 //       "MCU running but mis-handling the command". mcu_pmem_addr = the 8041 pmem fetch addr.
 // THREE rows, 8 cells, 16px, leftmost cell = MSB / first milestone. white=1.
-//   ROW 1 (vcnt 16-31): 8041 PC low byte (mcu_pmem_addr[7:0]) -- FLICKERS if the MCU is running
-//   ROW 2 (vcnt 40-55): MCU execution milestones, cell0..7 (left->right = program flow):
-//        0 $022(read cmd) 1 $0ED(EN I / dispatch entry) 2 $0F3(reached the jnc)
-//        3 $0F5(jnc did NOT branch => carry=1) 4 $0FB(passed both checks => jmpp/dispatch)
-//        5 $003(IBF INTERRUPT vector => EN I diverted) 6 mcu_pc[9] 7 mcu_pc[10]
-//   DISAMBIGUATION (why is $0F5 dark?): TWO causes, OPPOSITE fixes --
-//     (A) CARRY-BAIL: cell2 ($0F3) LIT + cell3 ($0F5) DARK + cell5 ($003) DARK
-//         => reached the jnc, it branched to $017 => add a,#$DB gave carry=0. ALU/internal-fetch bug.
-//     (B) INTERRUPT-DIVERT: cell5 ($003) LIT => the IBF interrupt fired after EN I@$0ED and vectored
-//         to $003 before the check finished. Interrupt path / int.vhd ALE-edge timing.
-//   ROW 3 (vcnt 64-79): COMMAND BYTE the 8041 received. MSB(bit7) leftmost. $33 expected.
-// READ: ROW1 flickering + cell0 ($022) LIT = MCU executing. Then read cell5 ($003) FIRST:
-//   lit = interrupt-divert (B); dark + cell2($0F3) lit + cell3($0F5) dark = carry-bail (A).
+//   ROW 1 (vcnt 16-31): LIVE $E502 status byte the BIOS polls (D7 left -> D0 right):
+//        cell0 present(0=yes) 1=(1) 2=(1) 3 bot_eot 4 ERR/ 5 EOT/ 6 FNO/ 7 REQ/
+//        ACTIVE-LOW "/" bits: 0 = ASSERTED. BIOS waits for FNO/=0 (cmd ack), then REQ/=0 (data ready).
+//   ROW 2 (vcnt 40-55): TAPE-DATA-PATH activity, cell0..7 (sticky; white=seen-at-least-once):
+//        0 $022(8041 reading cmds=alive) 1 $0FB(8041 dispatching) 2 motor_on(P1 motor commanded)
+//        3 tape_clock TOGGLED(streamer advancing) 4 tape_data TOGGLED(bits present)
+//        5 OUT-DBB($2C8|$3EF=8041 sent a byte) 6 OBF(byte avail to 6502) 7 6502 read $E502
+//   READ (counter-never-appears = no chunks loading): the first DARK cell localizes the break --
+//     cell2 motor DARK       => 8041 never commands the motor on a read (firmware/P1 decode).
+//     cell2 lit, cell3/4 DARK => motor on but streamer NOT advancing (tape_streamer/ce_tape/EOT).
+//     cell3/4 lit, cell5 DARK => tape bits flow but 8041 never OUT-DBBs (8041 tape-read assembly).
+//     cell5 lit, cell6/7 DARK => 8041 sends bytes but 6502 never sees them (DBB/status path).
+//   ROW 3 (vcnt 64-79): FIRST command byte the 8041 received. MSB(bit7) leftmost. $33 = priming.
+// READ: ROW1 flickering = MCU running. ROW2 is the tape pipeline L->R; first dark cell = the break.
 reg [10:0] diag_mcupc;
 reg [7:0]  diag_cmdval;   // byte the 8041 received on the last command write ($33 expected)
 reg diag_m022, diag_m0ed, diag_m0fb, diag_m170, diag_m0f3, diag_m003;
 reg diag_we501, diag_cmd_seen, diag_ibf, diag_obf, diag_req, diag_motor, diag_we500, diag_re502;
+// TAPE-ACTIVITY-PROBE-2026-06-04: tape data-path view (motor / clock-toggle / data-toggle / OUT-DBB)
+reg diag_outdbb, diag_clk_hi, diag_clk_lo, diag_dat_hi, diag_dat_lo;
+// READ-PIPELINE-PROBE-2026-06-04: trace WHERE the tape read dies + capture block-0 bytes.
+//   ROW1 milestones, ROW2=$0300[0] (expect 'H'=$48), ROW3=$033C ($0300+60, expect $8E=142).
+reg diag_m2e8, diag_m1a7, diag_m007, diag_rd_e500, diag_wr_0300;
+reg [7:0] diag_b0, diag_b60;
+// READ-PIPELINE-PROBE rev2 2026-06-04: is the tape ACTUALLY in the data region when the 8041 reads?
+// tape_clock only toggles in the DATA region (static in leader/bot/gap). Track its LIVE activity and
+// latch it at the 8041's data-sample ($0B4). clklive@read DARK = RCLK static while reading = tape NOT
+// in data = it reads nothing real => constant byte. LIT = tape IS streaming => bug is deeper.
+reg        tape_clk_prev;
+reg [16:0] tape_clk_idle;                 // clk_sys cycles since last tape_clock edge
+reg        diag_clklive_rd, diag_bot_rd;  // latched AT the $0B4 sample
+wire       tape_clk_live = (tape_clk_idle < 17'd100000);  // edge within ~1ms => RCLK toggling => in data
+// READ-PIPELINE-PROBE rev3 2026-06-04: does the 8041 get PAST the 0xAA header sync, or stuck in it?
+//   $272 = header-sync loop entered, $282 = header FOUND (sync exit), $304 = data-read loop,
+//   $2C8 = data byte OUT-DBB'd. If $282/$304/$2C8 DARK => 8041 never matches our 0xAA => stuck in
+//   sync, $05 is a STALE byte (bug = our header/data stream). If LIT => it IS reading data bytes.
+reg diag_m272, diag_m282, diag_m304, diag_m2c8;
+// READ-PIPELINE-PROBE rev4 2026-06-04: WHERE in the data loop does it die before $2C8?
+//   $317 = loop EXIT (8 bits done), $2C7 = the send path, $329/$33E = the WRONG branches at $317.
+//   $317 DARK => loop hangs mid-byte (never completes 8 bits). $317 LIT + $329/$33E LIT => it
+//   finished the byte but branched AWAY from the send (bank/flag wrong at $317).
+reg diag_m317, diag_m2c7, diag_m329, diag_m33e;
 always @(posedge clk_sys or posedge reset) begin
     if (reset) begin
         diag_mcupc <= 11'h000; diag_cmdval <= 8'h00;
         diag_m022<=1'b0; diag_m0ed<=1'b0; diag_m0fb<=1'b0; diag_m170<=1'b0; diag_m0f3<=1'b0; diag_m003<=1'b0;
         diag_we501<=1'b0; diag_cmd_seen<=1'b0; diag_ibf<=1'b0; diag_obf<=1'b0;
         diag_req<=1'b0; diag_motor<=1'b0; diag_we500<=1'b0; diag_re502<=1'b0;
+        diag_outdbb<=1'b0; diag_clk_hi<=1'b0; diag_clk_lo<=1'b0; diag_dat_hi<=1'b0; diag_dat_lo<=1'b0;
+        diag_m2e8<=1'b0; diag_m1a7<=1'b0; diag_m007<=1'b0; diag_rd_e500<=1'b0; diag_wr_0300<=1'b0;
+        diag_b0<=8'h00; diag_b60<=8'h00;
+        tape_clk_prev<=1'b0; tape_clk_idle<=17'd0; diag_clklive_rd<=1'b0; diag_bot_rd<=1'b0;
+        diag_m272<=1'b0; diag_m282<=1'b0; diag_m304<=1'b0; diag_m2c8<=1'b0;
+        diag_m317<=1'b0; diag_m2c7<=1'b0; diag_m329<=1'b0; diag_m33e<=1'b0;
     end else begin
         diag_mcupc <= mcu_pmem_addr;                  // live 8041 PC
         case (mcu_pmem_addr)                          // sticky MCU milestones
@@ -1227,30 +1258,75 @@ always @(posedge clk_sys or posedge reset) begin
             11'h0F3: diag_m0f3 <= 1'b1;   // reached the jnc@$0F3 (so the add executed; no interrupt-divert before it)
             11'h0F5: diag_m170 <= 1'b1;   // reached $0F5 = jnc did NOT branch => carry was 1 after add $DB
             11'h003: diag_m003 <= 1'b1;   // IBF interrupt vector => the EN-I@$0ED interrupt DIVERTED the dispatch
+            11'h2C8: diag_outdbb <= 1'b1; // OUT DBB,A (r3 response) — 8041 sent a byte to the 6502
+            11'h3EF: diag_outdbb <= 1'b1; // OUT DBB,A (mem[$3F] response)
+            // READ-PIPELINE-PROBE-2026-06-04 milestones:
+            11'h2E8: diag_m2e8 <= 1'b1;   // read_block_b actually DISPATCHED
+            11'h1A7: diag_m1a7 <= 1'b1;   // reached the RCLK edge-sync SAMPLE loop (dark => not read)
+            11'h007: diag_m007 <= 1'b1;   // timer ISR fired (read may be timer-driven)
+            // rev3 header-sync milestones:
+            11'h272: diag_m272 <= 1'b1;   // entered the 0xAA header sync loop
+            11'h282: diag_m282 <= 1'b1;   // FOUND the 0xAA header (sync exit) ★
+            11'h304: diag_m304 <= 1'b1;   // reached the data-read byte loop ★
+            11'h2C8: diag_m2c8 <= 1'b1;   // OUT-DBB'd a data byte ★
+            // rev4 loop-completion milestones:
+            11'h317: diag_m317 <= 1'b1;   // loop EXIT (8 bits done) ★
+            11'h2C7: diag_m2c7 <= 1'b1;   // the send path (-> $2C8)
+            11'h329: diag_m329 <= 1'b1;   // WRONG branch (r1!=0)
+            11'h33E: diag_m33e <= 1'b1;   // WRONG branch (r5!=0)
             default: ;
         endcase
         // 6502 / handshake side
         if (cpu_we_e5xx && cpu_addr[7:0]==8'h01) diag_we501    <= 1'b1;
         if (cpu_we_e5xx && cpu_addr[7:0]==8'h00) diag_we500    <= 1'b1;
         if (cpu_re_e5xx && cpu_addr[7:0]==8'h02) diag_re502    <= 1'b1;
+        // READ-PIPELINE-PROBE-2026-06-04: 6502 pulling a tape byte + buffering it at $0300/$033C
+        if (cpu_re_e5xx && cpu_addr[7:0]==8'h00)      diag_rd_e500 <= 1'b1;            // read DBBOUT
+        if (!cpu_rw_n && ce_hclk4 && cpu_addr==16'h0300) begin diag_wr_0300<=1'b1; diag_b0 <=cpu_dout; end
+        if (!cpu_rw_n && ce_hclk4 && cpu_addr==16'h033C) begin diag_wr_0300<=1'b1; diag_b60<=cpu_dout; end
+        // READ-PIPELINE-PROBE rev2: tape_clock live-activity (resets on each edge; climbs if static)
+        tape_clk_prev <= tape_clock;
+        if (tape_clock != tape_clk_prev)        tape_clk_idle <= 17'd0;
+        else if (tape_clk_idle != 17'h1FFFF)    tape_clk_idle <= tape_clk_idle + 17'd1;
+        if (mcu_pmem_addr == 11'h0B4) begin     // latch tape state AT the 8041 data-sample
+            diag_clklive_rd <= tape_clk_live;
+            diag_bot_rd     <= tape_bot;
+        end
         if (mcu_a0 && !mcu_wr_n) begin
             diag_cmd_seen <= 1'b1;
-            if (!diag_cmd_seen) diag_cmdval <= mcu_host_din;  // capture the FIRST command ($33 expected)
+            diag_cmdval <= mcu_host_din;  // LATEST command (was FIRST-only): does the BIOS ever send a tape-READ cmd?
         end
         if (mcu_host_sts[1])                     diag_ibf      <= 1'b1;
         if (mcu_host_sts[0])                     diag_obf      <= 1'b1;
         if (~mcu_p1_out[7])                      diag_req      <= 1'b1;   // REQ/ asserted (active-low)
         if (tape_motor_on)                       diag_motor    <= 1'b1;
+        // TAPE-ACTIVITY-PROBE-2026-06-04: did the streamer clock/data ever take BOTH values?
+        // (hi & lo => it toggled => tape advancing; static at idle => only one ever sets)
+        if (tape_clock) diag_clk_hi <= 1'b1; else diag_clk_lo <= 1'b1;
+        if (tape_data)  diag_dat_hi <= 1'b1; else diag_dat_lo <= 1'b1;
     end
 end
 
 // ROW1 = 8041 PC low byte; ROW2 = milestones(cell0..4) + PC hi bits(5..7); ROW3 = command byte.
-wire [7:0] diag_hi  = {diag_mcupc[0], diag_mcupc[1], diag_mcupc[2], diag_mcupc[3],
-                       diag_mcupc[4], diag_mcupc[5], diag_mcupc[6], diag_mcupc[7]};
-wire [7:0] diag_lo  = {diag_mcupc[10],diag_mcupc[9], diag_m003,     diag_m0fb,
-                       diag_m170,      diag_m0f3,     diag_m0ed,     diag_m022};
-wire [7:0] diag_chk = {diag_cmdval[0], diag_cmdval[1], diag_cmdval[2], diag_cmdval[3],
-                       diag_cmdval[4], diag_cmdval[5], diag_cmdval[6], diag_cmdval[7]};
+// TAPE-ACTIVITY-PROBE-2026-06-04: Row 1 = LIVE $E502 hardware-status byte the BIOS polls,
+// recomposed exactly as e5xx_status_byte (MAME decocass_m.cpp:1204-1212). MSB(D7) leftmost.
+//   D7=present(0=yes) D6=1 D5=1 D4=bot_eot D3=ERR(p2[2]) D2=EOT(p2[1]) D1=FNO(p2[0]) D0=REQ(p1[7])
+// READ-PIPELINE-PROBE-2026-06-04 row mapping (cell0 = LEFTMOST = bit0; read bit0->bit7 L->R):
+wire diag_clk_tog = diag_clk_hi & diag_clk_lo;   // tape clock toggled => streamer advancing
+wire diag_dat_tog = diag_dat_hi & diag_dat_lo;   // tape data toggled  => bits present
+// ROW1 = read pipeline.  L->R cells: $2E8(read dispatched) $1A7(SAMPLE loop) $007(timer ISR)
+//        OUT-DBB | 6502-rd-$E500 | 6502-wr-$0300 | clk-toggled | data-toggled
+//        ** $1A7 (cell1) DARK => the 8041 never runs the read sample loop = "not being read" **
+// ROW1 rev4: L->R = $304(loop) | $317(EXIT★) | $2C7(send-path) | $329(wrong-br) | $33E(wrong-br) |
+//            $2C8(SENT) | $1A7(edge-sync) | clk-live@read
+//   ★ cell1 ($317) DARK => loop HANGS mid-byte. cell1 LIT + $329/$33E LIT => finished byte, branched
+//     AWAY from the send. cell2 ($2C7) LIT + cell5 ($2C8) DARK => stalls between send-path and send.
+wire [7:0] diag_hi  = {diag_clklive_rd, diag_m1a7, diag_m2c8, diag_m33e,
+                       diag_m329, diag_m2c7, diag_m317, diag_m304};
+// ROW2 = $0300 byte 0   (expect 'H' = $48 -> Off Off Off On Off Off On Off)
+wire [7:0] diag_lo  = diag_b0;
+// ROW3 = $033C / block byte 60  (expect $8E = 142 -> Off On On On Off Off Off On)
+wire [7:0] diag_chk = diag_b60;
 
 wire [8:0] diag_x    = hcnt - 9'd8;
 wire       diag_in   = (hcnt >= 9'd8) && (hcnt < 9'd136);   // 8 cells * 16px
@@ -1263,6 +1339,11 @@ wire       diag_lit  = (diag_rowA && diag_hi[diag_cell]) |
                        (diag_rowB && diag_lo[diag_cell]) |
                        (diag_rowC && diag_chk[diag_cell]);
 wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
+// SWATCH-ON 2026-06-04: overlay RE-ENABLED for the READ-PIPELINE-PROBE (was SWATCH-OFF pass-through).
+// To hide again: restore the three pass-through lines below and comment the diag_show lines.
+// wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
+// wire [7:0] diag_g = core_g;
+// wire [7:0] diag_b = core_b;
 wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
 wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
 wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
