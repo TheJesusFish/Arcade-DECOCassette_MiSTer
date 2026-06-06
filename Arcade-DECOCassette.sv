@@ -736,6 +736,7 @@ wire        tape_data, tape_clock, tape_bot, tape_eot;
 
 // i8041 MCU + program memory
 wire [10:0] mcu_pmem_addr;   // DIAG-2026-06-03: 8041 program counter for the handshake probe
+wire [7:0]  mcu_dmem_r3, mcu_dmem_r5, mcu_dmem_r1;  // DIAG-REVERT-2026-06-05: rb0 r3/r5/r1 taps for the $317 probe
 i8041_top i8041_inst (
 	.clk_sys         (clk_sys),
 	.ce_hclk         (ce_hclk),
@@ -763,7 +764,11 @@ i8041_top i8041_inst (
 	.rom_we          (mcurom_we),
 	.rom_addr_w      (mcurom_addr),
 	.rom_data_w      (mcurom_dout),
-	.pmem_addr_o     (mcu_pmem_addr)
+	.pmem_addr_o     (mcu_pmem_addr),
+	// DIAG-REVERT-2026-06-05: rb0 r3/r5/r1 taps for the $317 byte-assembly probe
+	.dmem_r3_o       (mcu_dmem_r3),
+	.dmem_r5_o       (mcu_dmem_r5),
+	.dmem_r1_o       (mcu_dmem_r1)
 );
 
 // MCU ↔ Tape ↔ Main CPU interface
@@ -1237,6 +1242,12 @@ reg diag_m272, diag_m282, diag_m304, diag_m2c8;
 //   $317 DARK => loop hangs mid-byte (never completes 8 bits). $317 LIT + $329/$33E LIT => it
 //   finished the byte but branched AWAY from the send (bank/flag wrong at $317).
 reg diag_m317, diag_m2c7, diag_m329, diag_m33e;
+reg diag_m1cc, diag_m242;  // DIAG-REVERT-2026-06-05: interrupt-corruptor milestones ($1CC writes rb0.r1=#$1B; $242 = IBF handler)
+// DIAG-REVERT-2026-06-05: latched 8041 rb0 r3/r5/r1 at PC==$317 (one-shot, held for readout).
+// r3 = the 8041's assembled tape byte (THE A-vs-B splitter); r5/r1 = the nonzero CRC flags that
+// divert $318/$31B to the error branches ($33E/$329) instead of the send ($2C8).
+reg [7:0] diag_r3_317, diag_r5_317, diag_r1_317;
+reg       diag_b317_cap;
 always @(posedge clk_sys or posedge reset) begin
     if (reset) begin
         diag_mcupc <= 11'h000; diag_cmdval <= 8'h00;
@@ -1249,8 +1260,18 @@ always @(posedge clk_sys or posedge reset) begin
         tape_clk_prev<=1'b0; tape_clk_idle<=17'd0; diag_clklive_rd<=1'b0; diag_bot_rd<=1'b0;
         diag_m272<=1'b0; diag_m282<=1'b0; diag_m304<=1'b0; diag_m2c8<=1'b0;
         diag_m317<=1'b0; diag_m2c7<=1'b0; diag_m329<=1'b0; diag_m33e<=1'b0;
+        diag_r3_317<=8'h00; diag_r5_317<=8'h00; diag_r1_317<=8'h00; diag_b317_cap<=1'b0;  // DIAG-REVERT-2026-06-05
+        diag_m1cc<=1'b0; diag_m242<=1'b0;  // DIAG-REVERT-2026-06-05
     end else begin
         diag_mcupc <= mcu_pmem_addr;                  // live 8041 PC
+        // DIAG-REVERT-2026-06-05: one-shot capture of the 8041's assembled byte + CRC flags at PC==$317.
+        // dmem_mem[3]/[5]/[1] (rb0 r3/r5/r1) are settled by the time the fetch addr reaches $317.
+        if (mcu_pmem_addr == 11'h317 && !diag_b317_cap) begin
+            diag_r3_317   <= mcu_dmem_r3;   // assembled tape byte
+            diag_r5_317   <= mcu_dmem_r5;   // CRC flag (checked first)
+            diag_r1_317   <= mcu_dmem_r1;   // CRC flag (checked second)
+            diag_b317_cap <= 1'b1;
+        end
         case (mcu_pmem_addr)                          // sticky MCU milestones
             11'h022: diag_m022 <= 1'b1;
             11'h0ED: diag_m0ed <= 1'b1;
@@ -1264,6 +1285,8 @@ always @(posedge clk_sys or posedge reset) begin
             11'h2E8: diag_m2e8 <= 1'b1;   // read_block_b actually DISPATCHED
             11'h1A7: diag_m1a7 <= 1'b1;   // reached the RCLK edge-sync SAMPLE loop (dark => not read)
             11'h007: diag_m007 <= 1'b1;   // timer ISR fired (read may be timer-driven)
+            11'h1CC: diag_m1cc <= 1'b1;   // DIAG-REVERT-2026-06-05: the rb0.r1=#$1B corruptor ran (interrupt mis-dispatch)
+            11'h242: diag_m242 <= 1'b1;   // DIAG-REVERT-2026-06-05: IBF interrupt handler ran (should be DARK on a read)
             // rev3 header-sync milestones:
             11'h272: diag_m272 <= 1'b1;   // entered the 0xAA header sync loop
             11'h282: diag_m282 <= 1'b1;   // FOUND the 0xAA header (sync exit) ★
@@ -1321,12 +1344,26 @@ wire diag_dat_tog = diag_dat_hi & diag_dat_lo;   // tape data toggled  => bits p
 //            $2C8(SENT) | $1A7(edge-sync) | clk-live@read
 //   ★ cell1 ($317) DARK => loop HANGS mid-byte. cell1 LIT + $329/$33E LIT => finished byte, branched
 //     AWAY from the send. cell2 ($2C7) LIT + cell5 ($2C8) DARK => stalls between send-path and send.
-wire [7:0] diag_hi  = {diag_clklive_rd, diag_m1a7, diag_m2c8, diag_m33e,
-                       diag_m329, diag_m2c7, diag_m317, diag_m304};
-// ROW2 = $0300 byte 0   (expect 'H' = $48 -> Off Off Off On Off Off On Off)
-wire [7:0] diag_lo  = diag_b0;
-// ROW3 = $033C / block byte 60  (expect $8E = 142 -> Off On On On Off Off Off On)
-wire [7:0] diag_chk = diag_b60;
+// DIAG-REVERT-2026-06-05 ROW1 cells L->R (cell0=bit0): $003(IBF vec) $007(timer vec) $1CC(r1=#1B) $242(IBFhdlr) $329 $33E $317 $2C8
+// ORIGINAL (read-pipeline view):
+// wire [7:0] diag_hi  = {diag_clklive_rd, diag_m1a7, diag_m2c8, diag_m33e,
+//                        diag_m329, diag_m2c7, diag_m317, diag_m304};
+wire [7:0] diag_hi  = {diag_outdbb, diag_m317, diag_m33e, diag_m329,   // DIAG-2026-06-05: cell7 = OUTDBB (RELIABLE send flag; diag_m2c8 was DEAD via dup 11'h2C8 case)
+                       diag_m242, diag_m1cc, diag_m007, diag_m003};
+// DIAG-REVERT-2026-06-05: ROW2/ROW3 repointed from the STALE 6502-stored bytes (diag_b0/b60, both
+// read $05 = useless: the 8041 never sends, so the 6502 re-reads a dead DBBOUT) to the 8041's OWN
+// assembled byte r3 + the failing CRC flag r5, latched at PC==$317. r3 == correct data byte =>
+// sampling is fine => bug is the $11E CRC execution (B); r3 == garbage => sampling/phase (A).
+// To revert: restore the two diag_b0/diag_b60 lines and comment the diag_r3_317/diag_r5_317 lines.
+// ROW2 = $0300 byte 0   (STALE $05 — was useless)
+// wire [7:0] diag_lo  = diag_b0;
+// ROW3 = $033C byte 60  (STALE $05 — was useless)
+// wire [7:0] diag_chk = diag_b60;
+// ROW2 = 8041 assembled byte r3 @ $317  (THE A-vs-B readout; compare to block-0 byte0)
+wire [7:0] diag_lo  = diag_r3_317;
+// ROW3 = diag_b0 = the byte the 6502 RECEIVED & stored at $0300 (DIAG-2026-06-05). r5=r1=$00 => byte PASSES => 8041 sends.
+//        $20 here = read+delivery OK; $05/other = host-bus DBBOUT delivery bug.
+wire [7:0] diag_chk = diag_b0;
 
 wire [8:0] diag_x    = hcnt - 9'd8;
 wire       diag_in   = (hcnt >= 9'd8) && (hcnt < 9'd136);   // 8 cells * 16px

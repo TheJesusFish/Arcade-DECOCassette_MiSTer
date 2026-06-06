@@ -69,7 +69,14 @@ module i8041_top (
     input  wire [7:0]  rom_data_w,     // BRAM write data (A)
 
     // DIAG-2026-06-03: expose MCU program counter (pmem fetch addr) for the handshake probe
-    output wire [10:0] pmem_addr_o
+    output wire [10:0] pmem_addr_o,
+    // DIAG-REVERT-2026-06-05: expose rb0 r3/r5/r1 (= dmem[3]/[5]/[1]) so the wrapper can latch the
+    // 8041's assembled tape byte (r3) + the failing CRC flags (r5/r1) at PC==$317. Splits (A) sample-
+    // phase vs (B) $11E CRC-execution. Delete these 3 ports + the assigns below + the taps in
+    // Arcade-DECOCassette.sv to revert.
+    output wire [7:0]  dmem_r3_o,
+    output wire [7:0]  dmem_r5_o,
+    output wire [7:0]  dmem_r1_o
 );
 
     //--------------------------------------------------------------------------
@@ -135,6 +142,11 @@ module i8041_top (
         dmem_a_q <= dmem_addr[6:0];
     end
     assign dmem_dout = dmem_mem[dmem_a_q];
+
+    // DIAG-REVERT-2026-06-05: combinational taps of rb0 r3/r5/r1 for the $317 byte-assembly probe.
+    assign dmem_r3_o = dmem_mem[3];   // rb0.r3 = assembled tape byte (read at $317)
+    assign dmem_r5_o = dmem_mem[5];   // rb0.r5 = CRC flag tested first  ($318 jnz $33E)
+    assign dmem_r1_o = dmem_mem[1];   // rb0.r1 = CRC flag tested second ($31B jnz $329)
 
     //--------------------------------------------------------------------------
     // UPI41 Core Instantiation

@@ -334,7 +334,19 @@ module mcu_tape_iface (
     assign     mcu_cs_n  = ~hclk_strobe_active;
     assign     mcu_rd_n  = ~(hclk_strobe_active && strobe_is_re);
     assign     mcu_wr_n  = ~(hclk_strobe_active && strobe_is_we);
-    assign     mcu_a0    = cpu_addr_lo_lat[0];
+    // A0-LIVE-READ-FIX-2026-06-05: a0 was the LATCHED cpu_addr_lo_lat[0]. The BIOS read loop does
+    // `bit $e501` (a0=1) immediately before `lda $e500` (a0=0); the continuously-tracked latch could
+    // still present $E501's a0=1 during the $E500 read window -> db_o returned DBBSTS ($05) instead of
+    // DBBOUT ($20) AND the $E500 read didn't clear OBF. MEASURED: 8041 OUT-DBBs $20 (r3=$20, OUTDBB lit)
+    // but the 6502 stored $05 (DBBSTS = OBF+F0, position-independent). The 6502 holds its address stable
+    // for the whole access, so for READS bind a0 to the LIVE cpu_addr_lo[0]; WRITES keep the latched
+    // value (captured at access time for the delayed-strobe case). Original below.
+    // assign     mcu_a0    = cpu_addr_lo_lat[0];                                           // ORIGINAL (stale latch)
+    // assign     mcu_a0    = (hclk_strobe_active && strobe_is_re) ? cpu_addr_lo[0] : cpu_addr_lo_lat[0]; // v1: only live DURING strobe — 6502 samples AFTER strobe ends -> fell back to stale latch=1 -> still $05
+    // A0-LIVE-READ-FIX v2 2026-06-05: reads use the LIVE 6502 address UNCONDITIONALLY (the 6502 holds
+    // $E500 for the whole access, so a0=0 whenever the bus is sampled -> db_o = dbbout_q = $20, and the
+    // $E500 read clears OBF). Only WRITES use the latched value (write data captured at access time).
+    assign     mcu_a0    = strobe_is_we ? cpu_addr_lo_lat[0] : cpu_addr_lo[0];
     assign     mcu_dout  = cpu_dout_lat;
 
     // Capture MCU host_dout on read completion
