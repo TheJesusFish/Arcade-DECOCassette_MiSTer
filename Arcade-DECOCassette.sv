@@ -1248,6 +1248,21 @@ reg diag_m1cc, diag_m242;  // DIAG-REVERT-2026-06-05: interrupt-corruptor milest
 // divert $318/$31B to the error branches ($33E/$329) instead of the send ($2C8).
 reg [7:0] diag_r3_317, diag_r5_317, diag_r1_317;
 reg       diag_b317_cap;
+// DIAG-REVERT-2026-06-06: sticky-OR of mode_set ($E402). Any bit ever set => the GAME wrote the video
+// mode register => game code is EXECUTING. ROW2 all-dark after load => game never ran (DECO-222/hand-off).
+// ROW2 nonzero => game runs & configures video => bug is our BG-layer render. See
+// Claude/decocass_video_mode_mechanism_2026-06-06.md.
+reg [7:0] diag_modeset_seen;
+// DIAG-REVERT-2026-06-06: 6502-PC init-bisect milestones (sticky). PC = cpu_addr when cpu_sync=1.
+// Localizes the early-init hang via entered-sub vs returned-from-sub pairs across $24CA/$2606/$4A7D.
+// (Prior F131/F146/0503 all proved lit; collapsed to $05D4 = "init reached".)
+reg diag_pc05D4, diag_pc24CA, diag_pc05DC, diag_pc2606, diag_pc05DF, diag_pc4A7D, diag_pc05E2;
+// DIAG-REVERT-2026-06-06: LIVE 6502 PC bar = latest opcode-fetch addr. ROW2=hi byte (expect $4A while in
+// $4A7D), ROW3=lo byte (loop position). Multiple screenshots show the PC spread = where it spins.
+reg [15:0] diag_pc_live;
+// DIAG-REVERT-2026-06-06: lowest stack-page ($01xx) write addr. Normal jsr pushes stay HIGH ($01Fx down);
+// a $4A7D copy trampling the stack drives this LOW => corrupts saved rts return => $0000 jam.
+reg [7:0] diag_sp_min;
 always @(posedge clk_sys or posedge reset) begin
     if (reset) begin
         diag_mcupc <= 11'h000; diag_cmdval <= 8'h00;
@@ -1262,8 +1277,27 @@ always @(posedge clk_sys or posedge reset) begin
         diag_m317<=1'b0; diag_m2c7<=1'b0; diag_m329<=1'b0; diag_m33e<=1'b0;
         diag_r3_317<=8'h00; diag_r5_317<=8'h00; diag_r1_317<=8'h00; diag_b317_cap<=1'b0;  // DIAG-REVERT-2026-06-05
         diag_m1cc<=1'b0; diag_m242<=1'b0;  // DIAG-REVERT-2026-06-05
+        diag_modeset_seen <= 8'h00;  // DIAG-REVERT-2026-06-06
+        diag_pc05D4<=1'b0; diag_pc24CA<=1'b0; diag_pc05DC<=1'b0; diag_pc2606<=1'b0; diag_pc05DF<=1'b0; diag_pc4A7D<=1'b0; diag_pc05E2<=1'b0;  // DIAG-REVERT-2026-06-06
+        diag_pc_live <= 16'h0000;  // DIAG-REVERT-2026-06-06
+        diag_sp_min <= 8'hFF;  // DIAG-REVERT-2026-06-06
     end else begin
         diag_mcupc <= mcu_pmem_addr;                  // live 8041 PC
+        diag_modeset_seen <= diag_modeset_seen | mode_set_reg;  // DIAG-REVERT-2026-06-06: accumulate any mode_set bit ever written
+        // DIAG-REVERT-2026-06-06: bisect early-init hang ($05D9 jsr$24CA -> $05DC jsr$2606 -> $05DF jsr$4A7D -> $05E2)
+        if (cpu_sync) begin
+            diag_pc_live <= cpu_addr;  // DIAG-REVERT-2026-06-06: live PC bar
+            if (cpu_addr == 16'h05D4) diag_pc05D4 <= 1'b1;
+            if (cpu_addr == 16'h24CA) diag_pc24CA <= 1'b1;
+            if (cpu_addr == 16'h05DC) diag_pc05DC <= 1'b1;
+            if (cpu_addr == 16'h2606) diag_pc2606 <= 1'b1;
+            if (cpu_addr == 16'h05DF) diag_pc05DF <= 1'b1;
+            if (cpu_addr == 16'h4A7D) diag_pc4A7D <= 1'b1;
+            if (cpu_addr == 16'h05E2) diag_pc05E2 <= 1'b1;
+        end
+        // DIAG-REVERT-2026-06-06: stack-trample detector (lowest $01xx write addr; write = !cpu_rw_n)
+        if (!cpu_rw_n && cpu_addr[15:8] == 8'h01 && cpu_addr[7:0] < diag_sp_min)
+            diag_sp_min <= cpu_addr[7:0];
         // DIAG-REVERT-2026-06-05: one-shot capture of the 8041's assembled byte + CRC flags at PC==$317.
         // dmem_mem[3]/[5]/[1] (rb0 r3/r5/r1) are settled by the time the fetch addr reaches $317.
         if (mcu_pmem_addr == 11'h317 && !diag_b317_cap) begin
@@ -1360,10 +1394,22 @@ wire [7:0] diag_hi  = {diag_outdbb, diag_m317, diag_m33e, diag_m329,   // DIAG-2
 // ROW3 = $033C byte 60  (STALE $05 — was useless)
 // wire [7:0] diag_chk = diag_b60;
 // ROW2 = 8041 assembled byte r3 @ $317  (THE A-vs-B readout; compare to block-0 byte0)
-wire [7:0] diag_lo  = diag_r3_317;
+// DIAG-REVERT-2026-06-06: original below, uncomment to restore the $317 byte readout
+// wire [7:0] diag_lo  = diag_r3_317;
+// ROW2 now = sticky-OR of mode_set ($E402). All-dark after load => game never wrote video mode => game
+// not executing (DECO-222/hand-off). Nonzero (esp. bit3 bkg_ena) => game runs => bug is our BG render.
+// DIAG-REVERT-2026-06-06: ROW2 was mode_set; now = live 6502 PC HIGH byte (expect $4A while spinning)
+// wire [7:0] diag_lo  = diag_modeset_seen;
+// DIAG-REVERT-2026-06-06: ROW2 now = lowest $01xx stack write (low = trample). // diag_pc_live[15:8]
+wire [7:0] diag_lo  = diag_sp_min;   // DIAG-REVERT-2026-06-06
 // ROW3 = diag_b0 = the byte the 6502 RECEIVED & stored at $0300 (DIAG-2026-06-05). r5=r1=$00 => byte PASSES => 8041 sends.
 //        $20 here = read+delivery OK; $05/other = host-bus DBBOUT delivery bug.
-wire [7:0] diag_chk = diag_b0;
+// DIAG-REVERT-2026-06-06: original below, uncomment to restore the 6502-received-byte readout
+// wire [7:0] diag_chk = diag_b0;
+// ROW3 = 6502-PC init bisect L->R: c0=$05D4 c1=$24CA c2=$05DC c3=$2606 c4=$05DF c5=$4A7D c6=$05E2 (c7 unused)
+// DIAG-REVERT-2026-06-06: ROW3 was PC milestones; now = live 6502 PC LOW byte (loop position)
+// wire [7:0] diag_chk = {1'b0, diag_pc05E2, diag_pc4A7D, diag_pc05DF, diag_pc2606, diag_pc05DC, diag_pc24CA, diag_pc05D4};
+wire [7:0] diag_chk = diag_pc_live[7:0];   // DIAG-REVERT-2026-06-06
 
 wire [8:0] diag_x    = hcnt - 9'd8;
 wire       diag_in   = (hcnt >= 9'd8) && (hcnt < 9'd136);   // 8 cells * 16px
@@ -1378,12 +1424,18 @@ wire       diag_lit  = (diag_rowA && diag_hi[diag_cell]) |
 wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
 // SWATCH-ON 2026-06-04: overlay RE-ENABLED for the READ-PIPELINE-PROBE (was SWATCH-OFF pass-through).
 // To hide again: restore the three pass-through lines below and comment the diag_show lines.
-// wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
-// wire [7:0] diag_g = core_g;
-// wire [7:0] diag_b = core_b;
-wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
-wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
-wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
+// SWATCH-OFF 2026-06-05: overlay disabled for clean screenshots (post tape-load-fix). Re-enable = swap back.
+// DIAG-REVERT-2026-06-06: overlay RE-ENABLED for the mode_set probe. To hide again, restore the 3
+// pass-through lines below and comment the 3 diag_show lines.
+// VIDEO-ALIGN-2026-06-06: overlay OFF (pass-through) for a CLEAN alignment
+// screenshot. To re-enable the probe bands for the CPU-lockup work, swap these
+// 3 pass-through lines back to the diag_show form directly below.
+wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
+wire [7:0] diag_g = core_g;
+wire [7:0] diag_b = core_b;
+// wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;   // DIAG-REVERT-2026-06-06
 // ===== end DIAG-REVERT-2026-06-03c =====
 
 // Palette lookup (task 11)
@@ -1477,6 +1529,44 @@ wire no_rotate  = status[2] | direct_video;
 wire rotate_ccw = 1'b1;  // ROT270 = CCW for portrait DECO Cassette
 wire flip       = 1'b0;
 
+// ===== VIDEO-ALIGN-2026-06-06: pixel-pipeline vs blank/sync alignment =====
+// The RGB content path lags hcnt by ~12 px (USER-MEASURED on screen, 1.5 tiles):
+//   - video_fg is NOT prefetched: tile/char BRAM reads (2 cy) aren't ready when
+//     the shift-reg loads at the tile boundary, so the SR loads tile N's data at
+//     the START of tile N+1's window => a full 8-px (1 tile) defer, same root as
+//     Common-Pitfalls/"Tile rows off-by-one at startup" but uniform here because
+//     the FG text layer is static.
+//   - plus the register chain: fg_pen, mixer out_pen, palette BRAM, palette RGB
+//     reg (~4 px).
+//   = ~12 px total, vs video_timing's hblank/hsync/vblank/vsync at 1 stage.
+// Net ~12-px skew => content arrives ~12 px AFTER the active window opens. Because
+// the display is ROT270 (screen_rotate CCW), this raster-HORIZONTAL skew shows
+// up ON SCREEN as a VERTICAL shift (content pushed UP, top rows clipped, equal
+// overflow at the bottom). Fix = delay blank+sync to match the content pipeline
+// so the active window lands on the actual pixels. The hblank/vblank windows
+// themselves already match MAME set_raw(384,0,256,272,8,248), so ONLY this
+// alignment delay is needed -- nothing in vcnt/vblank.
+// WHY HORIZONTAL FOR A VERTICAL SYMPTOM: see Common-Pitfalls/"Counter wrap mid-
+// line breaks offset math" -- Tutankham lost a week treating this exact rotated-
+// axis symptom as a vertical bug. Confirmed CCW mapping in sys/arcade_video.v
+// screen_rotate (raster hcnt -> display vertical).
+// TUNING: if a residual shift remains after the build, nudge VID_HV_DELAY by
+// +/-1..2 (raise = push content DOWN on screen, lower = push UP).
+localparam [4:0] VID_HV_DELAY = 5'd12;   // user-measured 12 px; 1..16 (SR is 16 deep)
+
+reg [15:0] hbl_sr, vbl_sr, hs_sr, vs_sr;
+always @(posedge clk_sys) if (ce_pix) begin
+	hbl_sr <= {hbl_sr[14:0], video_hblank};
+	vbl_sr <= {vbl_sr[14:0], video_vblank};
+	hs_sr  <= {hs_sr[14:0],  video_hsync};
+	vs_sr  <= {vs_sr[14:0],  video_vsync};
+end
+wire video_hblank_d = hbl_sr[VID_HV_DELAY-1];
+wire video_vblank_d = vbl_sr[VID_HV_DELAY-1];
+wire video_hsync_d  = hs_sr[VID_HV_DELAY-1];
+wire video_vsync_d  = vs_sr[VID_HV_DELAY-1];
+// ===== end VIDEO-ALIGN-2026-06-06 =====
+
 screen_rotate screen_rotate (.*);
 
 arcade_video #(256,24,1) arcade_video (
@@ -1484,10 +1574,15 @@ arcade_video #(256,24,1) arcade_video (
 	.clk_video (clk_vid),
 	.RGB_in    (rgb_pause),
 	.ce_pix    (ce_pix),
-	.HBlank    (video_hblank),
-	.VBlank    (video_vblank),
-	.HSync     (video_hsync),
-	.VSync     (video_vsync),
+	// VIDEO-ALIGN-2026-06-06: feed pipeline-delayed blank/sync (originals below)
+	// .HBlank    (video_hblank),
+	// .VBlank    (video_vblank),
+	// .HSync     (video_hsync),
+	// .VSync     (video_vsync),
+	.HBlank    (video_hblank_d),
+	.VBlank    (video_vblank_d),
+	.HSync     (video_hsync_d),
+	.VSync     (video_vsync_d),
 	.fx        (3'b000)
 );
 

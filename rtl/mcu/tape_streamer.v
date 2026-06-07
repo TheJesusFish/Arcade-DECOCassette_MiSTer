@@ -206,8 +206,6 @@ module tape_streamer (
                         ({block_num, 8'h00} + (byte_offset - BYTE_DATA_START)) :
                         18'h0;
 
-
-// START Rodimus Comment Block
     // =====================================================================
     // Current byte value selection
     // Mirrors MAME get_status_bits() logic
@@ -252,57 +250,6 @@ module tape_streamer (
     //     else if (ce_tape) tape_data_r <= current_byte[bit_offset];
     // assign tape_data = tape_data_r;
     assign tape_data = current_byte[bit_offset];   // ORIGINAL (restored)
-// END Rodimus Comment Block
-
-
-
-// START Grok Suggestions
-
-    // // Register image address to better match BRAM timing
-    // reg [17:0] image_addr_r;
-    // always @(posedge clk_sys) begin
-    //     if (ce_tape) image_addr_r <= image_addr;
-    // end
-    // // Then change the original assign to:
-    // // assign image_addr = image_addr_r;   // or keep driving the combo one and just use the registered data above
-
-    // // =====================================================================
-    // // Current byte value selection + BRAM latency pipeline
-    // // Mirrors MAME get_status_bits() logic
-    // // =====================================================================
-
-    // reg [7:0] current_byte_r;
-
-    // always @(posedge clk_sys) begin
-    //     if (ce_tape) begin
-    //         current_byte_r <= 
-    //             in_leader || in_leader_gap || in_bot_gap ||
-    //             in_eot_gap || in_trailer || in_eot ? 8'h00 :
-    //             in_bot || in_eot ? 8'h00 :
-    //             (byte_offset >= BYTE_PRE_GAP_START && byte_offset <= BYTE_PRE_GAP_END) ? 8'h00 :
-    //             (byte_offset == BYTE_LEADIN) ? 8'h00 :
-    //             (byte_offset == BYTE_HEADER) ? 8'hAA :
-    //             (byte_offset >= BYTE_DATA_START && byte_offset <= BYTE_DATA_END) ? image_q :
-    //             (byte_offset == BYTE_CRC_MSB) ? crc_q[15:8] :
-    //             (byte_offset == BYTE_CRC_LSB) ? crc_q[7:0] :
-    //             (byte_offset == BYTE_TRAILER) ? 8'hAA :
-    //             (byte_offset == BYTE_LEADOUT) ? 8'h00 :
-    //             (byte_offset == BYTE_LONGCLOCK) ? 8'h00 :
-    //             (byte_offset >= BYTE_POSTGAP_START && byte_offset <= BYTE_POSTGAP_END) ? 8'h00 :
-    //             8'h00;
-    //     end
-    // end
-
-    // // =====================================================================
-    // // Output: tape_data (serial, LSB-first)
-    // // =====================================================================
-    // wire [2:0] aligned_bit = bit_offset + 3'd1;   // +1   ← change to + 3'd7 if still bad
-
-    // assign tape_data = current_byte_r[aligned_bit];
-
-// END Grok Suggestions
-
-
 
     // =====================================================================
     // Output: tape_clock (active high during clocked regions, MAME line 304-315)
@@ -319,7 +266,7 @@ module tape_streamer (
     // data on the wrong edge -> no valid bytes -> "deck not responding". Now matches MAME line 305.
     assign tape_clock = (byte_offset == BYTE_LONGCLOCK) ? 1'b1 :  // LONGCLOCK holds high
                        (clk_region_active) ? clk_bit :            // alternating read clock (MAME polarity)
-                       1'b0;                                       // Idle
+                       1'b0;                                      // Idle
 
     // =====================================================================
     // Output: tape_bot and tape_eot (hole sense signals)
