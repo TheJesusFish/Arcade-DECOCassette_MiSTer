@@ -380,10 +380,27 @@ assign ioctl_din        = 8'd0;
 // Reset and DIP handling
 wire reset = (RESET | status[0] | buttons[1] | ioctl_download);
 
+// DSW-DEFAULTS-2026-06-06: DECO has BIOS-RESERVED DIP bits that MUST be set or the game
+// mis-boots. The game's FIRST init instruction is `lda $e301` (DSW2) then `eor #$ff` and it
+// table-branches on the result; a wrong DSW2 derails init → wrong (zero) decompress count at
+// $4A7D → runaway copy tramples the stack → lockup. MAME factory defaults (decocass.cpp DSW1/DSW2):
+//   sw[2]=DSW1=0x3F : Coin 1C/1C, "Type of Tape"=MD(Small)=0x30 (SW1:5,6, "Used by the bios"), Upright
+//   sw[3]=DSW2=0xFF : option bits all-default + "Country Code"=A=0xe0 (SW2:6,7,8, "DON'T CHANGE")
+// Powering up at $00 made Country Code=000 (not a valid code) → the lockup.
+// HARDCODED until a proper OSD DSW section exists: power up to the factory defaults AND block
+// ioctl_index 254 from touching DSW1/DSW2, so a zero DIP-download can't stomp the reserved bits.
+// FUTURE OSD: drop the `sw_idx != 2/3` guard and ghost out the reserved bits in the menu.
+// See vault note "DECO Cassette BIOS-reserved DIP switches".
 reg [7:0] sw[8];
+initial begin
+	sw[0] = 8'h00; sw[1] = 8'h00; sw[2] = 8'h3F; sw[3] = 8'hFF;
+	sw[4] = 8'h00; sw[5] = 8'h00; sw[6] = 8'h00; sw[7] = 8'h00;
+end
+wire [2:0] sw_idx = ioctl_addr[2:0];
 always @(posedge clk_sys)
-	if (ioctl_wr && (ioctl_index==8'd254) && !ioctl_addr[24:3])
-		sw[ioctl_addr[2:0]] <= ioctl_dout;
+	if (ioctl_wr && (ioctl_index==8'd254) && !ioctl_addr[24:3]
+	    && sw_idx != 3'd2 && sw_idx != 3'd3)   // protect hardcoded DSW1/DSW2
+		sw[sw_idx] <= ioctl_dout;
 
 // Extract metadata from ROM loader
 wire [7:0] dongle_type_byte;
@@ -492,15 +509,21 @@ spram #(.address_width(15), .data_width(8)) work_ram (
 // =========================================================================
 // 2026-05-17 — Render-side charram lives in video_fg.v as 3 separate planes
 // (per MAME `charlayout` 3bpp). This SPRAM is the *CPU readback* copy for
-// when BIOS reads from $6000-$BFFF. It aliases all 3 planes into one 8 KB
-// window — BIOS doesn't seem to read charram back in early boot, so this is
-// acceptable for now. A proper fix would split this into 3 SPRAMs too.
-wire [12:0] charram_addr_cpu;
+// when the CPU reads from $6000-$BFFF.
+// CHARRAM-CPU-RW-FIX-2026-06-07: WAS 8 KB aliasing all 3 planes (assumed "BIOS doesn't read charram
+// back" — FALSE: the loaded GAME's $4A7D RLE decompressor reads its source from charram ($79B4),
+// so the 8 KB alias corrupted that read -> runaway copy -> stack trample -> $0000 jam -> white screen).
+// Now a LINEAR 24 KB window (addr = cpu_addr-$6000 from decocass.v) so writes/reads round-trip exactly.
+// (32 KB BRAM; uses $0000-$5FFF. Render side in video_fg.v is independent and unchanged.)
+// DIAG-REVERT: original 13-bit (8 KB) form below.
+// wire [12:0] charram_addr_cpu;
+wire [14:0] charram_addr_cpu;
 wire        charram_we_p0, charram_we_p1, charram_we_p2;
 wire        charram_we_any = charram_we_p0 | charram_we_p1 | charram_we_p2;
 wire [7:0]  charram_dw_cpu, charram_q;
 
-spram #(.address_width(13), .data_width(8)) charram (
+// spram #(.address_width(13), .data_width(8)) charram (   // DIAG-REVERT: original 8 KB
+spram #(.address_width(15), .data_width(8)) charram (
 	.clock     (clk_sys),
 	.enable    (1'b1),
 	.address   (charram_addr_cpu),
@@ -1368,6 +1391,65 @@ end
 // TAPE-ACTIVITY-PROBE-2026-06-04: Row 1 = LIVE $E502 hardware-status byte the BIOS polls,
 // recomposed exactly as e5xx_status_byte (MAME decocass_m.cpp:1204-1212). MSB(D7) leftmost.
 //   D7=present(0=yes) D6=1 D5=1 D4=bot_eot D3=ERR(p2[2]) D2=EOT(p2[1]) D1=FNO(p2[0]) D0=REQ(p1[7])
+// DONGLE-PROBE-2026-06-07: capture the FIRST 3 bytes the 6502 reads at $E500 (= the dongle output the
+// BIOS sees). Repoints the 3 swatch rows below to show them. Each ROW = one byte, cell0(left)=bit0(LSB)
+// ... cell7(right)=bit7(MSB), white=1. Compare to MAME's first 3 $E500 reads (bpset $e500): MATCH =>
+// dongle output OK (Error-01 is elsewhere); DIFFER => dongle output wrong (pattern says PROM vs permute).
+reg [7:0] diag_d500_0, diag_d500_1, diag_d500_2;
+reg [1:0] diag_d500_cnt;
+always @(posedge clk_sys) begin
+	if (reset) diag_d500_cnt <= 2'd0;
+	else if (cpu_re_e5xx && cpu_addr == 16'hE500 && diag_d500_cnt != 2'd3) begin
+		case (diag_d500_cnt)
+			2'd0: diag_d500_0 <= dongle_din_full;
+			2'd1: diag_d500_1 <= dongle_din_full;
+			2'd2: diag_d500_2 <= dongle_din_full;
+		endcase
+		diag_d500_cnt <= diag_d500_cnt + 2'd1;
+	end
+end
+
+// WHITE-SCREEN-PROBE-2026-06-07: cflyball white-screens — the 6502 hangs in the $4A7D RLE decompressor
+// (write trips the stack page $0100 -> rts pulls $0000 -> jam -> pen-8 white). Capture the SIX zero-page
+// SEEDS the routine loads, frozen the instant the PC reaches $4A9D (the `jsr $4aa5` that enters the copy
+// loop). At that fetch all six `sta $0X` stores ($4A82..$4A9B) have completed, so the live shadows hold:
+//   $01/$02 = SRC ptr , $03/$04 = DEST ptr , $05/$06 = COUNT.
+// MAME seed reference (zero.hex $0001..$0006 == `bpset 4a9d` then read $1..$6): B4 79 00 C0 00 00
+//   => SRC=$79B4, DEST=$C000 (round => genuine seed), COUNT=$0000.
+//   MATCH on our hw  => seed-table load is fine; the trample is DOWNSTREAM = source DATA at $79B4 OR our
+//                       T65's ($zp,x) indirect / 16-bit inc-dec in deco222.v (MAME runs fine w/ COUNT=0,
+//                       so termination is the data-driven zero-marker `beq $4abd`, NOT the count).
+//   DIFFER          => our loaded seed table / tape data is wrong (data bug, not the CPU).
+// One-shot capture, held for swatch. Revert: delete this block + restore the diag_d500 row mapping below.
+reg [7:0] zp01_live, zp02_live, zp03_live, zp04_live, zp05_live, zp06_live;
+reg [7:0] seed01, seed02, seed03, seed04, seed05, seed06;
+reg       seed_cap;
+always @(posedge clk_sys) begin
+	if (reset) begin
+		zp01_live<=8'h00; zp02_live<=8'h00; zp03_live<=8'h00;
+		zp04_live<=8'h00; zp05_live<=8'h00; zp06_live<=8'h00;
+		seed01<=8'h00; seed02<=8'h00; seed03<=8'h00;
+		seed04<=8'h00; seed05<=8'h00; seed06<=8'h00; seed_cap<=1'b0;
+	end else begin
+		if (!cpu_rw_n && ce_hclk4) begin            // 6502 zero-page write (matches the $0300 snoop style above)
+			case (cpu_addr)
+				16'h0001: zp01_live <= cpu_dout;
+				16'h0002: zp02_live <= cpu_dout;
+				16'h0003: zp03_live <= cpu_dout;
+				16'h0004: zp04_live <= cpu_dout;
+				16'h0005: zp05_live <= cpu_dout;
+				16'h0006: zp06_live <= cpu_dout;
+				default: ;
+			endcase
+		end
+		if (cpu_sync && cpu_addr == 16'h4A9D && !seed_cap) begin   // PC fetch of `jsr $4aa5`
+			seed01<=zp01_live; seed02<=zp02_live; seed03<=zp03_live;
+			seed04<=zp04_live; seed05<=zp05_live; seed06<=zp06_live;
+			seed_cap<=1'b1;
+		end
+	end
+end
+
 // READ-PIPELINE-PROBE-2026-06-04 row mapping (cell0 = LEFTMOST = bit0; read bit0->bit7 L->R):
 wire diag_clk_tog = diag_clk_hi & diag_clk_lo;   // tape clock toggled => streamer advancing
 wire diag_dat_tog = diag_dat_hi & diag_dat_lo;   // tape data toggled  => bits present
@@ -1382,8 +1464,12 @@ wire diag_dat_tog = diag_dat_hi & diag_dat_lo;   // tape data toggled  => bits p
 // ORIGINAL (read-pipeline view):
 // wire [7:0] diag_hi  = {diag_clklive_rd, diag_m1a7, diag_m2c8, diag_m33e,
 //                        diag_m329, diag_m2c7, diag_m317, diag_m304};
-wire [7:0] diag_hi  = {diag_outdbb, diag_m317, diag_m33e, diag_m329,   // DIAG-2026-06-05: cell7 = OUTDBB (RELIABLE send flag; diag_m2c8 was DEAD via dup 11'h2C8 case)
-                       diag_m242, diag_m1cc, diag_m007, diag_m003};
+// DONGLE-PROBE-2026-06-07: ROW1 = 1st $E500 dongle byte (orig 8041-milestone bits commented below)
+// wire [7:0] diag_hi  = {diag_outdbb, diag_m317, diag_m33e, diag_m329,   // DIAG-2026-06-05: cell7 = OUTDBB (RELIABLE send flag; diag_m2c8 was DEAD via dup 11'h2C8 case)
+//                        diag_m242, diag_m1cc, diag_m007, diag_m003};
+// WHITE-SCREEN-PROBE-2026-06-07: overlay repointed to the 6 zero-page seeds (seed01..seed06); the
+// diag_d500 capture block above is left intact but its 3 row assignments are commented out here.
+// wire [7:0] diag_hi  = diag_d500_0;
 // DIAG-REVERT-2026-06-05: ROW2/ROW3 repointed from the STALE 6502-stored bytes (diag_b0/b60, both
 // read $05 = useless: the 8041 never sends, so the 6502 re-reads a dead DBBOUT) to the 8041's OWN
 // assembled byte r3 + the failing CRC flag r5, latched at PC==$317. r3 == correct data byte =>
@@ -1401,7 +1487,9 @@ wire [7:0] diag_hi  = {diag_outdbb, diag_m317, diag_m33e, diag_m329,   // DIAG-2
 // DIAG-REVERT-2026-06-06: ROW2 was mode_set; now = live 6502 PC HIGH byte (expect $4A while spinning)
 // wire [7:0] diag_lo  = diag_modeset_seen;
 // DIAG-REVERT-2026-06-06: ROW2 now = lowest $01xx stack write (low = trample). // diag_pc_live[15:8]
-wire [7:0] diag_lo  = diag_sp_min;   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_lo  = diag_sp_min;   // DIAG-REVERT-2026-06-06
+// WHITE-SCREEN-PROBE-2026-06-07: commented out (was DONGLE-PROBE ROW2 = 2nd $E500 dongle byte)
+// wire [7:0] diag_lo  = diag_d500_1;
 // ROW3 = diag_b0 = the byte the 6502 RECEIVED & stored at $0300 (DIAG-2026-06-05). r5=r1=$00 => byte PASSES => 8041 sends.
 //        $20 here = read+delivery OK; $05/other = host-bus DBBOUT delivery bug.
 // DIAG-REVERT-2026-06-06: original below, uncomment to restore the 6502-received-byte readout
@@ -1409,19 +1497,40 @@ wire [7:0] diag_lo  = diag_sp_min;   // DIAG-REVERT-2026-06-06
 // ROW3 = 6502-PC init bisect L->R: c0=$05D4 c1=$24CA c2=$05DC c3=$2606 c4=$05DF c5=$4A7D c6=$05E2 (c7 unused)
 // DIAG-REVERT-2026-06-06: ROW3 was PC milestones; now = live 6502 PC LOW byte (loop position)
 // wire [7:0] diag_chk = {1'b0, diag_pc05E2, diag_pc4A7D, diag_pc05DF, diag_pc2606, diag_pc05DC, diag_pc24CA, diag_pc05D4};
-wire [7:0] diag_chk = diag_pc_live[7:0];   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_chk = diag_pc_live[7:0];   // DIAG-REVERT-2026-06-06
+// WHITE-SCREEN-PROBE-2026-06-07: commented out (was DONGLE-PROBE ROW3 = 3rd $E500 dongle byte)
+// wire [7:0] diag_chk = diag_d500_2;
 
 wire [8:0] diag_x    = hcnt - 9'd8;
 wire       diag_in   = (hcnt >= 9'd8) && (hcnt < 9'd136);   // 8 cells * 16px
 wire [2:0] diag_cell = diag_x[6:4];
 wire       diag_gap  = (diag_x[3:0] >= 4'd14);              // 2px gap between cells
-wire       diag_rowA = (vcnt >= 9'd16) && (vcnt < 9'd32);   // PC hi
-wire       diag_rowB = (vcnt >= 9'd40) && (vcnt < 9'd56);   // PC lo
-wire       diag_rowC = (vcnt >= 9'd64) && (vcnt < 9'd80);   // checkpoints
-wire       diag_lit  = (diag_rowA && diag_hi[diag_cell]) |
-                       (diag_rowB && diag_lo[diag_cell]) |
-                       (diag_rowC && diag_chk[diag_cell]);
-wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
+// WHITE-SCREEN-PROBE-2026-06-07: 6 rows = the 6 zero-page seeds, top->bottom:
+//   ROW A($01 SRC lo)  B($02 SRC hi)  C($03 DEST lo)  D($04 DEST hi)  E($05 COUNT lo)  F($06 COUNT hi)
+//   Each row: cell0(LEFT)=bit0(LSB) ... cell7(RIGHT)=bit7(MSB), white=1. Read each row as one hex byte.
+//   Expect (= MAME zero.hex $01..$06): A=B4 B=79 C=00 D=C0 E=00 F=00  => SRC=$79B4 DEST=$C000 COUNT=$0000.
+// DIAG-REVERT-2026-06-07: original 3-row (DONGLE-PROBE) mapping commented out below.
+// wire       diag_rowA = (vcnt >= 9'd16) && (vcnt < 9'd32);   // PC hi
+// wire       diag_rowB = (vcnt >= 9'd40) && (vcnt < 9'd56);   // PC lo
+// wire       diag_rowC = (vcnt >= 9'd64) && (vcnt < 9'd80);   // checkpoints
+// wire       diag_lit  = (diag_rowA && diag_hi[diag_cell]) |
+//                        (diag_rowB && diag_lo[diag_cell]) |
+//                        (diag_rowC && diag_chk[diag_cell]);
+// wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
+wire       diag_rowA = (vcnt >= 9'd16)  && (vcnt < 9'd32);    // $01 SRC lo
+wire       diag_rowB = (vcnt >= 9'd40)  && (vcnt < 9'd56);    // $02 SRC hi
+wire       diag_rowC = (vcnt >= 9'd64)  && (vcnt < 9'd80);    // $03 DEST lo
+wire       diag_rowD = (vcnt >= 9'd88)  && (vcnt < 9'd104);   // $04 DEST hi
+wire       diag_rowE = (vcnt >= 9'd112) && (vcnt < 9'd128);   // $05 COUNT lo
+wire       diag_rowF = (vcnt >= 9'd136) && (vcnt < 9'd152);   // $06 COUNT hi
+wire       diag_lit  = (diag_rowA && seed01[diag_cell]) |
+                       (diag_rowB && seed02[diag_cell]) |
+                       (diag_rowC && seed03[diag_cell]) |
+                       (diag_rowD && seed04[diag_cell]) |
+                       (diag_rowE && seed05[diag_cell]) |
+                       (diag_rowF && seed06[diag_cell]);
+wire       diag_show = (diag_rowA | diag_rowB | diag_rowC |
+                        diag_rowD | diag_rowE | diag_rowF) && diag_in && !diag_gap;
 // SWATCH-ON 2026-06-04: overlay RE-ENABLED for the READ-PIPELINE-PROBE (was SWATCH-OFF pass-through).
 // To hide again: restore the three pass-through lines below and comment the diag_show lines.
 // SWATCH-OFF 2026-06-05: overlay disabled for clean screenshots (post tape-load-fix). Re-enable = swap back.
@@ -1430,12 +1539,14 @@ wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_g
 // VIDEO-ALIGN-2026-06-06: overlay OFF (pass-through) for a CLEAN alignment
 // screenshot. To re-enable the probe bands for the CPU-lockup work, swap these
 // 3 pass-through lines back to the diag_show form directly below.
-wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
-wire [7:0] diag_g = core_g;
-wire [7:0] diag_b = core_b;
-// wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;   // DIAG-REVERT-2026-06-06
-// wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;   // DIAG-REVERT-2026-06-06
-// wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;   // DIAG-REVERT-2026-06-06
+// DONGLE-PROBE-2026-06-07: overlay RE-ENABLED to show the 3 $E500 dongle bytes. To hide again, swap
+// these 3 diag_show lines back to the core_* pass-through below.
+// wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
+// wire [7:0] diag_g = core_g;
+// wire [7:0] diag_b = core_b;
+wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;   // DIAG-REVERT-2026-06-06
+wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;   // DIAG-REVERT-2026-06-06
+wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;   // DIAG-REVERT-2026-06-06
 // ===== end DIAG-REVERT-2026-06-03c =====
 
 // Palette lookup (task 11)

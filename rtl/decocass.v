@@ -93,7 +93,12 @@ module decocass (
     output wire        ram_we_w,
     output wire [7:0]  ram_dw,
 
-    output wire [12:0] charram_addr_w,    // 13-bit (8 KB per plane; charram is 3 planes × 8 KB)
+    // CHARRAM-CPU-RW-FIX-2026-06-07: widened 13->15 bits. The CPU-readback charram must be a
+    // LINEAR 24 KB ($6000-$BFFF) so a byte written reads back identically (the $4A7D RLE
+    // decompressor reads its source from charram). 13-bit aliased all 3 planes into 8 KB.
+    // DIAG-REVERT: original below.
+    // output wire [12:0] charram_addr_w,    // 13-bit (8 KB per plane; charram is 3 planes × 8 KB)
+    output wire [14:0] charram_addr_w,    // 15-bit linear: plane0=$0000 plane1=$2000 plane2=$4000
     output wire        charram_we_p0,     // plane 0 ($6000-$7FFF) write enable
     output wire        charram_we_p1,     // plane 1 ($8000-$9FFF) write enable
     output wire        charram_we_p2,     // plane 2 ($A000-$BFFF) write enable
@@ -278,7 +283,14 @@ module decocass (
     wire   sel_charram_p1 = sel_charram && (cpu_addr_int[15:13] == 3'b100);
     wire   sel_charram_p2 = sel_charram && (cpu_addr_int[15:13] == 3'b101);
 
-    assign charram_addr_w = cpu_addr_int[12:0];
+    // CHARRAM-CPU-RW-FIX-2026-06-07: linear offset so $6000-$BFFF round-trips as 24 KB. The per-plane
+    // write enables (we_p0/p1/p2) still split the planes; with the linear address each plane lands in
+    // its own 8 KB band (plane0=$0000-$1FFF, plane1=$2000-$3FFF, plane2=$4000-$5FFF), so a CPU write
+    // and a later CPU read at the SAME $6000-$BFFF address hit the SAME cell (no more 8 KB aliasing).
+    // (16-bit subtract; result $0000-$5FFF in range, MSB truncates losslessly into the 15-bit bus.)
+    // DIAG-REVERT: original below.
+    // assign charram_addr_w = cpu_addr_int[12:0];
+    assign charram_addr_w = cpu_addr_int - 16'h6000;
     assign charram_dw     = cpu_dout_int;
     assign charram_we_p0  = (sel_charram_p0 && !cpu_rw_n_int && ce_main);
     assign charram_we_p1  = (sel_charram_p1 && !cpu_rw_n_int && ce_main);
