@@ -93,12 +93,24 @@ module cassette_loader (
             bram_dout  <= data;
 
             if (is_first_byte) begin
-                image_size_bytes <= 18'd1;
+                // NUMBLOCKS-FIX-2026-06-07: track the LAST NON-ZERO byte (MAME: numblocks =
+                // ((last_nonzero|0xFF)+1)/256), NOT the full file size. We were counting all 64 KB =>
+                // 256 blocks => the EOT marker landed ~112 blocks too late. After the real data ends
+                // (block 144) the tape was NOT yet at EOT, so the 8041 handed back a stale byte instead
+                // of 0, and the game's post-load EOT check ($0582: lda $e500 / cmp #0 / beq) failed =>
+                // jmp $F000 => reload. Tracking last-nonzero makes num_blocks=(size+255)>>8 round to 144
+                // so EOT asserts right after the data. DIAG-REVERT: original (full-file count) below.
+                // image_size_bytes <= 18'd1;
+                image_size_bytes <= (data != 8'h00) ? 18'd1 : 18'd0;
                 crc_acc          <= tape_crc16_byte(16'h0000, data);
                 byte_in_block    <= 8'd1;
                 current_block    <= 8'd0;
             end else begin
-                image_size_bytes <= image_size_bytes + 18'd1;
+                // NUMBLOCKS-FIX-2026-06-07: advance only on a NON-ZERO byte, to (its offset + 1) =
+                // last-non-zero + 1 (trailing zeros must NOT extend the tape length / EOT position).
+                // DIAG-REVERT: original (count every byte) below.
+                // image_size_bytes <= image_size_bytes + 18'd1;
+                if (data != 8'h00) image_size_bytes <= cassette_addr_rel[17:0] + 18'd1;
                 if (byte_in_block == 8'd255) begin
                     crc_table_we   <= 1'b1;
                     crc_table_addr <= current_block;

@@ -972,7 +972,16 @@ assign dongle_din_low4 = dongle_din_full[3:0];
 // e5xx_dongle (from mcu_tape_iface) already returns the correct STATUS byte for cpu_addr[1]==1, so
 // keep it there; route cpu_addr[1]==0 (DATA) through dongle_mux's dongle_din_full (nodong/type1/
 // type3 each handle their A0 split internally). Was: decocass.v fed raw e5xx_dongle, dongle ignored.
-assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle : dongle_din_full;
+// E500-ZERO-TEST-2026-06-07: viability test (user's idea). Force $E500 (cpu_addr[1:0]==00 = the MCU DATA
+// register) to read 0 ONCE the game is past the load (rt_seen05E2 = PC reached $05E2, set only post-
+// decompressor = post-load). During the load rt_seen05E2=0 => real tape data flows (load UNAFFECTED);
+// after handoff => $E500 reads 0, so the BIOS post-load MCU check ($0582: lda $e500/cmp#0/beq $058f)
+// PASSES instead of jmp $F000. If the game then BOOTS, it's viable and $E500's stale value is the sole
+// blocker (next: implement the real fix). If it still bounces, the RESET-TRACE overlay shows the new
+// bail point. DIAG-REVERT-2026-06-07: original below, restore to remove the force.
+// assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle : dongle_din_full;
+assign e5xx_to_cpu = (rt_seen05E2 && cpu_addr[1:0] == 2'b00) ? 8'h00
+                   : (cpu_addr[1] ? e5xx_dongle : dongle_din_full);
 
 // Dongle PROM (4 KB, shared across types 2-5; Type 3 needs full 4 KB).
 // During load: rom_loader drives dongleprom_addr; during run: dongle_mux drives dprom_addr.
@@ -1449,6 +1458,48 @@ always @(posedge clk_sys) begin
 		end
 	end
 end
+// NOTE: seed-capture above is now CLOSED/validated (our seeds == MAME RAM $4AE3 = load is correct). Its
+// display is superseded by RESET-TRACE below; block left intact for reference.
+
+// RESET-TRACE-2026-06-07: cflyball now LOADS + DECOMPRESSES correctly (seeds proven == MAME), but after a
+// screen flash it RESETS to the BIOS loader. HW reset + IRQ are wired out (reset = RESET|status0|buttons1|
+// ioctl_download ; deco222 .irq_n=1'b1), so the 6502 must reach BIOS in SOFTWARE. Catch HOW: once the game
+// runs past the decompressor (PC reaches $05E2), freeze the FIRST restart-class BIOS entry the 6502 fetches
+// + the game PC just before it, + sticky landmark flags. Decode:
+//   rt_entry = $F003/$F670 => coin-NMI fired mid-game ; $F000/$F053 => COLD restart (jmp/jam to reset path).
+//   rt_pre   = the exact PC right before the jump -> disassemble FlyingBall-Loaded.hex there to see what it
+//              was doing (poll a register? consume decompressed data?). PC = cpu_addr when cpu_sync=1.
+// Revert: delete this block + restore the WHITE-SCREEN-PROBE seed rows below.
+reg        rt_seen05E2, rt_cap;
+reg        rt_f000, rt_f003, rt_f053, rt_f670, rt_f32d;   // sticky: BIOS landmark fetched AFTER $05E2
+reg [15:0] rt_prevpc;                                     // rolling last opcode-fetch PC before the entry
+reg [15:0] rt_entry, rt_pre;                              // frozen: BIOS-entry PC + the PC before it
+always @(posedge clk_sys) begin
+	if (reset) begin
+		rt_seen05E2<=1'b0; rt_cap<=1'b0;
+		rt_f000<=1'b0; rt_f003<=1'b0; rt_f053<=1'b0; rt_f670<=1'b0; rt_f32d<=1'b0;
+		rt_prevpc<=16'h0000; rt_entry<=16'h0000; rt_pre<=16'h0000;
+	end else if (cpu_sync) begin
+		if (cpu_addr == 16'h05E2) rt_seen05E2 <= 1'b1;        // decompressor returned = game running deep
+		if (rt_seen05E2) begin
+			if (cpu_addr == 16'hF000) rt_f000 <= 1'b1;        // cold reset vector (JMP table)
+			if (cpu_addr == 16'hF003) rt_f003 <= 1'b1;        // NMI vector  (JMP $F670)
+			if (cpu_addr == 16'hF053) rt_f053 <= 1'b1;        // cold init body
+			if (cpu_addr == 16'hF670) rt_f670 <= 1'b1;        // NMI/coin handler
+			if (cpu_addr == 16'hF32D) rt_f32d <= 1'b1;        // BIOS main init re-ran => full restart
+			if (!rt_cap) begin
+				if (cpu_addr==16'hF000 || cpu_addr==16'hF003 ||
+				    cpu_addr==16'hF053 || cpu_addr==16'hF670) begin
+					rt_entry <= cpu_addr;   // the restart-class BIOS entry it jumped to
+					rt_pre   <= rt_prevpc;  // the instruction right before the jump
+					rt_cap   <= 1'b1;
+				end else begin
+					rt_prevpc <= cpu_addr;  // track latest PC (incl. normal BIOS service calls)
+				end
+			end
+		end
+	end
+end
 
 // READ-PIPELINE-PROBE-2026-06-04 row mapping (cell0 = LEFTMOST = bit0; read bit0->bit7 L->R):
 wire diag_clk_tog = diag_clk_hi & diag_clk_lo;   // tape clock toggled => streamer advancing
@@ -1517,18 +1568,34 @@ wire       diag_gap  = (diag_x[3:0] >= 4'd14);              // 2px gap between c
 //                        (diag_rowB && diag_lo[diag_cell]) |
 //                        (diag_rowC && diag_chk[diag_cell]);
 // wire       diag_show = (diag_rowA | diag_rowB | diag_rowC) && diag_in && !diag_gap;
-wire       diag_rowA = (vcnt >= 9'd16)  && (vcnt < 9'd32);    // $01 SRC lo
-wire       diag_rowB = (vcnt >= 9'd40)  && (vcnt < 9'd56);    // $02 SRC hi
-wire       diag_rowC = (vcnt >= 9'd64)  && (vcnt < 9'd80);    // $03 DEST lo
-wire       diag_rowD = (vcnt >= 9'd88)  && (vcnt < 9'd104);   // $04 DEST hi
-wire       diag_rowE = (vcnt >= 9'd112) && (vcnt < 9'd128);   // $05 COUNT lo
-wire       diag_rowF = (vcnt >= 9'd136) && (vcnt < 9'd152);   // $06 COUNT hi
-wire       diag_lit  = (diag_rowA && seed01[diag_cell]) |
-                       (diag_rowB && seed02[diag_cell]) |
-                       (diag_rowC && seed03[diag_cell]) |
-                       (diag_rowD && seed04[diag_cell]) |
-                       (diag_rowE && seed05[diag_cell]) |
-                       (diag_rowF && seed06[diag_cell]);
+// RESET-TRACE-2026-06-07 row map (cell0=LEFT=bit0(LSB); read each row as one hex byte):
+//   A=rt_entry lo  B=rt_entry hi  C=rt_pre lo  D=rt_pre hi
+//   E=flags: c0 seen$05E2 | c1 captured | c2 $F000 | c3 $F003(NMIvec) | c4 $F053 | c5 $F670(NMIhdlr) | c6 $F32D(reinit) | c7 -
+//   F=live PC lo (where the 6502 is NOW)
+//   Read: E.c0 dark => never reached $05E2 (reset during/before decompress). A/B = BIOS entry it jumped to:
+//   $F003 or $F670 => coin-NMI mid-game ; $F000/$F053 => cold restart. C/D = the PC just before -> disasm it.
+wire [7:0] rt_entry_lo = rt_entry[7:0];
+wire [7:0] rt_entry_hi = rt_entry[15:8];
+wire [7:0] rt_pre_lo   = rt_pre[7:0];
+wire [7:0] rt_pre_hi   = rt_pre[15:8];
+wire [7:0] rt_pclive   = diag_pc_live[7:0];
+wire [7:0] rt_flags    = {1'b0, rt_f32d, rt_f670, rt_f053, rt_f003, rt_f000, rt_cap, rt_seen05E2};
+wire       diag_rowA = (vcnt >= 9'd16)  && (vcnt < 9'd32);    // rt_entry lo
+wire       diag_rowB = (vcnt >= 9'd40)  && (vcnt < 9'd56);    // rt_entry hi
+wire       diag_rowC = (vcnt >= 9'd64)  && (vcnt < 9'd80);    // rt_pre lo
+wire       diag_rowD = (vcnt >= 9'd88)  && (vcnt < 9'd104);   // rt_pre hi
+wire       diag_rowE = (vcnt >= 9'd112) && (vcnt < 9'd128);   // flags
+wire       diag_rowF = (vcnt >= 9'd136) && (vcnt < 9'd152);   // live PC lo
+// DIAG-REVERT-2026-06-07: WHITE-SCREEN-PROBE seed mapping (validated, now superseded) below.
+// wire       diag_lit  = (diag_rowA && seed01[diag_cell]) | (diag_rowB && seed02[diag_cell]) |
+//                        (diag_rowC && seed03[diag_cell]) | (diag_rowD && seed04[diag_cell]) |
+//                        (diag_rowE && seed05[diag_cell]) | (diag_rowF && seed06[diag_cell]);
+wire       diag_lit  = (diag_rowA && rt_entry_lo[diag_cell]) |
+                       (diag_rowB && rt_entry_hi[diag_cell]) |
+                       (diag_rowC && rt_pre_lo[diag_cell])   |
+                       (diag_rowD && rt_pre_hi[diag_cell])   |
+                       (diag_rowE && rt_flags[diag_cell])    |
+                       (diag_rowF && rt_pclive[diag_cell]);
 wire       diag_show = (diag_rowA | diag_rowB | diag_rowC |
                         diag_rowD | diag_rowE | diag_rowF) && diag_in && !diag_gap;
 // SWATCH-ON 2026-06-04: overlay RE-ENABLED for the READ-PIPELINE-PROBE (was SWATCH-OFF pass-through).
@@ -1541,12 +1608,15 @@ wire       diag_show = (diag_rowA | diag_rowB | diag_rowC |
 // 3 pass-through lines back to the diag_show form directly below.
 // DONGLE-PROBE-2026-06-07: overlay RE-ENABLED to show the 3 $E500 dongle bytes. To hide again, swap
 // these 3 diag_show lines back to the core_* pass-through below.
-// wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
-// wire [7:0] diag_g = core_g;
-// wire [7:0] diag_b = core_b;
-wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;   // DIAG-REVERT-2026-06-06
-wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;   // DIAG-REVERT-2026-06-06
-wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;   // DIAG-REVERT-2026-06-06
+// SWATCH-OFF-2026-06-07: overlay = pass-through for CLEAN screenshots / pixel comparison (game RUNS; the
+// RESET-TRACE bands aren't needed while we chase the last-15-block garbage). Re-enable = swap back to the
+// diag_show form below.
+wire [7:0] diag_r = core_r;   // SWATCH-OFF pass-through
+wire [7:0] diag_g = core_g;
+wire [7:0] diag_b = core_b;
+// wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;   // DIAG-REVERT-2026-06-06
+// wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;   // DIAG-REVERT-2026-06-06
 // ===== end DIAG-REVERT-2026-06-03c =====
 
 // Palette lookup (task 11)
