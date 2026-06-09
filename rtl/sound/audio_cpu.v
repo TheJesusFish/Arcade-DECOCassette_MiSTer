@@ -128,11 +128,14 @@ module audio_cpu (
         end
     end
 
-    // NMI fires only when ALL three are true:
-    //   audio_nmi_master_enable — main CPU's $E416 bit 0
-    //   audio_nmi_enabled_r     — audio CPU has accessed $1000-$17FF
-    //   audio_nmi_state         — vcounter-derived periodic signal
-    assign cpu_nmi_n = ~(audio_nmi_master_enable & audio_nmi_enabled_r & audio_nmi_state);
+    // AUDIO-NMI-FIX-2026-06-08: MAME audio NMI = (m_audio_nmi_enabled && m_audio_nmi_state),
+    // exactly TWO terms (decocass_m.cpp:114). The old 3rd term audio_nmi_master_enable was tied to the
+    // main CPU's $E416 write — but $E416 is the QUADRATURE-DECODER reset (decocass.cpp:117), NOT an
+    // audio-NMI enable, so that term was never set => audio NMI held off forever => SILENT. Drop it to
+    // match MAME. (audio_nmi_master_enable now unused; wrapper still drives it harmlessly.)
+    // Original (3-term, wrong) below:
+    // assign cpu_nmi_n = ~(audio_nmi_master_enable & audio_nmi_enabled_r & audio_nmi_state);
+    assign cpu_nmi_n = ~(audio_nmi_enabled_r & audio_nmi_state);
 
     // ========================================================================
     // Memory decode and read/write strobes
