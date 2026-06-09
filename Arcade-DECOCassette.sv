@@ -218,8 +218,8 @@ localparam CONF_STR = {
 	"DIP;",
 	"-;",
 	"R0,Reset;",
-	"J1,Button 1,Coin,Start 1P,Start 2P,Pause;",
-	"jn,A,Select,Start,R,L;",
+	"J1,Button 1,Button 2,Coin,Start 1P,Start 2P,Pause;",
+	"jn,A,B,Select,Start,R,L;",
 	"V,v",`BUILD_DATE
 };
 
@@ -705,7 +705,12 @@ decocass decocass_inst (
 	.dsw1              (sw[2] | 8'h30),
 	.dsw2              (sw[3]),
 	.vblank            (video_vblank),
-	.coin_in           (joystick_0[14] | joystick_1[14]),  // P1 or P2 coin → main-CPU NMI (MAME decocass_m.cpp:155-159)
+	// CONTROLS-FIX-2026-06-08: coin moved to joy[6] to match new CONF_STR (Coin=bit6).
+	// NOTE: coin_in feeds the MAIN-CPU NMI — the ONLY joystick line with a path to the loader.
+	// If the loader regresses on this build, flip back to the commented line below (joy[14]) to
+	// isolate — no rebuild-from-memory needed:
+	// .coin_in           (joystick_0[14] | joystick_1[14]),  // P1 or P2 coin → main-CPU NMI (MAME decocass_m.cpp:155-159)
+	.coin_in           (joystick_0[6] | joystick_1[6]),  // P1/P2 coin → main-CPU NMI
 	.ram_addr_w        (ram_addr_cpu),
 	.ram_we_w          (ram_we_cpu),
 	.ram_dw            (ram_dw_cpu),
@@ -1010,7 +1015,8 @@ wire [7:0]  input_q;
 wire [7:0] in0, in1, in2;
 assign in0 = {2'b11, ~joystick_0[5:0]};         // P1: bits[5:0]=R/L/U/D/B1/B2
 assign in1 = {2'b11, ~joystick_1[5:0]};         // P2: bits[5:0]=R/L/U/D/B1/B2
-assign in2 = {~joystick_0[15], 1'b1, ~joystick_0[13], 1'b1, ~joystick_0[14], ~joystick_1[14], ~joystick_0[12], 1'b1};  // Coins, starts
+assign in2 = {~joystick_0[6], ~joystick_1[6], 1'b0,
+              joystick_0[8]|joystick_1[8], joystick_0[7]|joystick_1[7], 3'b000}; // Coins, starts (stray '-' from HEAD removed)
 
 inputs inputs_inst (
 	.clk_sys          (clk_sys),

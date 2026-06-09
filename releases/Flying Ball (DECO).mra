@@ -94,5 +94,5 @@
         <dip name="Country Code" bits="29,30,31" ids="inv,inv,F,E,D,C,B,A"/>
     </switches>
 
-    <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
+    <buttons names="Button1,Button2,Coin,Start 1P,Start 2P,Pause" default="A,B,Select,Start,R,L"/>
 </misterromdescription>
