@@ -23,7 +23,7 @@ module dongle_mux (
     input  wire        ce_hclk4,
     input  wire        reset,
 
-    input  wire [2:0]  dongle_type,
+    input  wire [3:0]  dongle_type,   // widened: 7 = Darksoft multigame (8 = Widel, later)
     input  wire [7:0]  game_id,    // 2026-05-30: 8-bit = DECO release number (type1 case key)
     input  wire [3:0]  swap_mode,
 
@@ -33,7 +33,7 @@ module dongle_mux (
     input  wire [7:0]  cpu_dout,
     output reg  [7:0]  cpu_din_full,
 
-    output reg  [11:0] dprom_addr,
+    output reg  [19:0] dprom_addr,   // widened to 20-bit (1 MB) for the multigame dongle ROM
     input  wire [7:0]  dprom_q,
 
     // MCU host-bus registers (DBBOUT/DBBSTS) per MAME `upi41_master_r(0/1)`
@@ -108,27 +108,39 @@ module dongle_mux (
         .cpu_din_full (nodong_q)
     );
 
+    // Darksoft multigame dongle — 20-bit counter into a 1 MB ROM (MAME decocass_darksoft_state)
+    wire [19:0] darksoft_prom_addr;
+    wire [7:0]  darksoft_q;
+    dongle_darksoft darksoft_inst (
+        .clk_sys (clk_sys), .ce_hclk4 (ce_hclk4), .reset (reset),
+        .cpu_re (cpu_re), .cpu_we (cpu_we),
+        .cpu_addr_lo (cpu_addr_lo), .cpu_dout (cpu_dout),
+        .cpu_din_full (darksoft_q),
+        .prom_addr (darksoft_prom_addr), .prom_q (dprom_q),
+        .mcu_dbb_dout (mcu_dbb_dout), .mcu_dbb_sts (mcu_dbb_sts)
+    );
+
     always @(*) begin
         case (dongle_type)
-            3'b001:  cpu_din_full = type1_q;
-            3'b010:  cpu_din_full = type2_q;
-            3'b011:  cpu_din_full = type3_q;
-            3'b100:  cpu_din_full = type4_q;
-            3'b101:  cpu_din_full = type5_q;
-            3'b110:  cpu_din_full = nodong_q;
+            4'd1:    cpu_din_full = type1_q;
+            4'd2:    cpu_din_full = type2_q;
+            4'd3:    cpu_din_full = type3_q;
+            4'd4:    cpu_din_full = type4_q;
+            4'd5:    cpu_din_full = type5_q;
+            4'd6:    cpu_din_full = nodong_q;
+            4'd7:    cpu_din_full = darksoft_q;          // Darksoft multigame (1 MB)
             default: cpu_din_full = 8'hFF;
         endcase
     end
 
     always @(*) begin
         case (dongle_type)
-            3'b001:  dprom_addr = {4'b0000, type1_prom_addr};
-            3'b010:  dprom_addr = {3'b000,  type2_prom_addr};
-            3'b011:  dprom_addr = type3_prom_addr;
-            3'b100:  dprom_addr = type4_prom_addr[11:0];
-            3'b101:  dprom_addr = 12'h000;
-            3'b110:  dprom_addr = 12'h000;
-            default: dprom_addr = 12'h000;
+            4'd1:    dprom_addr = {12'd0, type1_prom_addr};            // 8-bit
+            4'd2:    dprom_addr = {11'd0, type2_prom_addr};            // 9-bit
+            4'd3:    dprom_addr = {8'd0,  type3_prom_addr};            // 12-bit
+            4'd4:    dprom_addr = {8'd0,  type4_prom_addr[11:0]};      // 12-bit (preserve original truncation)
+            4'd7:    dprom_addr = darksoft_prom_addr;                  // 20-bit (Darksoft 1 MB)
+            default: dprom_addr = 20'd0;
         endcase
     end
 

@@ -37,11 +37,6 @@ set_global_assignment -name VHDL_FILE rtl/cpu/T48/timer.vhd
 # CPU memory map and decode (phase 06)
 set_global_assignment -name VERILOG_FILE rtl/decocass.v
 
-# Memory primitives
-set_global_assignment -name VERILOG_FILE rtl/dpram.v
-set_global_assignment -name VHDL_FILE    rtl/dpram_dc.vhd
-set_global_assignment -name VERILOG_FILE rtl/spram.v
-
 # Common
 set_global_assignment -name VERILOG_FILE rtl/hiscore.v
 set_global_assignment -name VERILOG_FILE rtl/pause.v
@@ -94,7 +89,13 @@ set_global_assignment -name VERILOG_FILE rtl/dongle/dongle_type3.v
 set_global_assignment -name VERILOG_FILE rtl/dongle/dongle_type4.v
 set_global_assignment -name VERILOG_FILE rtl/dongle/dongle_type5.v
 set_global_assignment -name VERILOG_FILE rtl/dongle/dongle_nodong.v
+set_global_assignment -name VERILOG_FILE rtl/dongle/dongle_darksoft.v
 
-# ROM / cassette loader (phase 25)
-set_global_assignment -name VERILOG_FILE rtl/rom/rom_loader.v
-set_global_assignment -name VERILOG_FILE rtl/rom/cassette_loader.v
+# RAM & ROM
+set_global_assignment -name VERILOG_FILE        rtl/ram_rom/rom_loader.v
+set_global_assignment -name VERILOG_FILE        rtl/ram_rom/cassette_loader.v
+set_global_assignment -name VERILOG_FILE        rtl/ram_rom/dpram.v
+set_global_assignment -name VERILOG_FILE        rtl/ram_rom/spram.v
+set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/ddram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/sdram.sv
+set_global_assignment -name VHDL_FILE           rtl/ram_rom/dpram_dc.vhd

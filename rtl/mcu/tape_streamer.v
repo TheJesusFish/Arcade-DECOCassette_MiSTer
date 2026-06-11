@@ -94,7 +94,9 @@ module tape_streamer (
     wire [31:0] dataclock;
     wire [8:0]  byte_offset;
     wire [2:0]  bit_offset;
-    wire [7:0]  block_num;
+    // TIMING-FIX-2026-06-09: block_num is now a REGISTERED counter (was a combinational ÷5296).
+    reg  [7:0]  block_num;
+    reg  [31:0] block_base;   // tape position of the start of the current block (= RBG_END + block_num*CLOCKS_PER_BLOCK)
 
     // Current byte being output
     wire [7:0]  current_byte;
@@ -147,16 +149,49 @@ module tape_streamer (
     end
 
     // =====================================================================
+    // TIMING-FIX-2026-06-09: registered block counter (replaces the 32-bit ÷/% CLOCKS_PER_BLOCK)
+    // =====================================================================
+    // The old `data_region_clocks / 5296` and `% 5296` were a ~58 ns combinational divide on clk_sys
+    // (failed setup by -47 ns, restricted Fmax 17.29 MHz) => non-deterministic builds. Track the block
+    // with a counter instead: block_base = tape position of the start of the current block; dataclock is
+    // then an exact SUBTRACT (below). clockpos moves by at most ±step (1 or 7) per ce_tape, so we cross at
+    // most ONE block boundary per tick. block_num/block_base are REGISTERED => stable all cycle, so the
+    // 8041 never samples a mid-settle transient. (Reset signal handles the clockpos->0 jump.)
+    //
+    // Mirror of the clockpos-update result (matches the always block above), for the counter:
+    wire [31:0] clockpos_next = !(ce_tape && motor_on) ? clockpos :
+                                direction ? ((clockpos + step < total_clocks) ? (clockpos + step) : (total_clocks - 1))
+                                          : ((clockpos > step) ? (clockpos - step) : 32'd0);
+
+    always @(posedge clk_sys) begin
+        if (reset) begin
+            block_num  <= 8'd0;
+            block_base <= REGION_BOT_GAP_END;          // start of block 0
+        end else if (ce_tape && motor_on) begin
+            if (clockpos_next >= block_base + CLOCKS_PER_BLOCK) begin
+                block_num  <= block_num + 8'd1;        // crossed forward into the next block
+                block_base <= block_base + CLOCKS_PER_BLOCK;
+            end else if (clockpos_next < block_base && block_num != 8'd0) begin
+                block_num  <= block_num - 8'd1;        // crossed back into the previous block (rewind)
+                block_base <= block_base - CLOCKS_PER_BLOCK;
+            end
+        end
+    end
+
+    // =====================================================================
     // Combinational: Decode tape position into region/block/byte/bit
     // =====================================================================
 
     assign data_region_clocks = (clockpos >= REGION_BOT_GAP_END) ?
-                                (clockpos - REGION_BOT_GAP_END) : 32'h0;
+                                (clockpos - REGION_BOT_GAP_END) : 32'h0;   // kept: feeds clk_bit (RCLK parity)
 
-    assign dataclock = data_region_clocks % CLOCKS_PER_BLOCK;
-    assign byte_offset = dataclock / CLOCKS_PER_BYTE;
-    assign bit_offset = (dataclock / CLOCKS_PER_BIT) & 3'h7;
-    assign block_num = (data_region_clocks / CLOCKS_PER_BLOCK) & 8'hFF;
+    // TIMING-FIX-2026-06-09: dataclock = exact position within the current block via SUBTRACT (no divide);
+    // block_num is the registered counter above. Originals (32-bit combinational divide/modulo) below:
+    // assign dataclock = data_region_clocks % CLOCKS_PER_BLOCK;
+    // assign block_num = (data_region_clocks / CLOCKS_PER_BLOCK) & 8'hFF;
+    assign dataclock   = (clockpos >= block_base) ? (clockpos - block_base) : 32'h0;
+    assign byte_offset = dataclock / CLOCKS_PER_BYTE;          // ÷16 = shift (power of two, cheap)
+    assign bit_offset  = (dataclock / CLOCKS_PER_BIT) & 3'h7;  // ÷2  = shift (cheap)
 
     // =====================================================================
     // Region detection (mirrors MAME lines 232-275)
@@ -170,10 +205,21 @@ module tape_streamer (
     // wire [31:0] trailer_start = total_clocks - REGION_BOT_GAP_END;
     // wire [31:0] eot_gap_start = total_clocks - REGION_BOT_END;
     // wire [31:0] eot_start = total_clocks - BOT_CLOCKS;
-    wire [31:0] eot_gap_start     = total_clocks - REGION_BOT_GAP_END;     // total - 13452
-    wire [31:0] eot_start         = total_clocks - REGION_BOT_END;         // total - 12012
-    wire [31:0] trailer_gap_start = total_clocks - REGION_LEADER_GAP_END;  // total - 12000
-    wire [31:0] trailer_start     = total_clocks - REGION_LEADER_END;      // total - 4800
+    // TIMING-FIX-2026-06-09b: these were combinational subtracts of total_clocks. STA showed the residual
+    // -6.75 ns failing path is total_clocks[*] -> (region compare -> bot_eot) -> the MAIN 6502 ($E502 status
+    // read, deco222 T65). total_clocks is CONSTANT after reset, so REGISTER the boundaries => total_clocks is
+    // off the clockpos->status->6502 combinational path. Originals (combinational) below:
+    // wire [31:0] eot_gap_start     = total_clocks - REGION_BOT_GAP_END;
+    // wire [31:0] eot_start         = total_clocks - REGION_BOT_END;
+    // wire [31:0] trailer_gap_start = total_clocks - REGION_LEADER_GAP_END;
+    // wire [31:0] trailer_start     = total_clocks - REGION_LEADER_END;
+    reg [31:0] eot_gap_start, eot_start, trailer_gap_start, trailer_start;
+    always @(posedge clk_sys) begin
+        eot_gap_start     <= total_clocks - REGION_BOT_GAP_END;     // total - 13452
+        eot_start         <= total_clocks - REGION_BOT_END;         // total - 12012
+        trailer_gap_start <= total_clocks - REGION_LEADER_GAP_END;  // total - 12000
+        trailer_start     <= total_clocks - REGION_LEADER_END;      // total - 4800
+    end
 
     wire in_leader     = (clockpos < REGION_LEADER_END);
     wire in_leader_gap = (clockpos >= REGION_LEADER_END &&

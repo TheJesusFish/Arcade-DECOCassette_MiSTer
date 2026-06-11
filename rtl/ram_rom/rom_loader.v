@@ -59,7 +59,7 @@ module rom_loader (
 
     // Dongle PROM (4 KB, used by types 2/3/4/5; Type 3 uses full 12-bit counter)
     output reg         dongleprom_we,
-    output reg  [11:0] dongleprom_addr,
+    output reg  [17:0] dongleprom_addr,   // legacy 4 KB region uses low bits; 256 KB multigame via index 1
     output reg  [7:0]  dongleprom_dout,
 
     // Metadata block ($02E00):
@@ -147,7 +147,7 @@ module rom_loader (
             else if (sel_dongprom) begin
                 // Dongle PROM: route to dongle PROM BRAM (4 KB, 12-bit addr)
                 dongleprom_we   <= 1'b1;
-                dongleprom_addr <= dongprom_addr_rel;
+                dongleprom_addr <= {6'd0, dongprom_addr_rel};
                 dongleprom_dout <= data;
             end
             else if (sel_metadata) begin
@@ -160,6 +160,15 @@ module rom_loader (
                 endcase
             end
             // sel_spare is ignored (type-1 swap table reserved for future)
+        end
+        else if (ioctl_download && ioctl_wr && ioctl_index == 8'd1 && !ioctl_addr[24:18]) begin
+            // Multigame dongle ROM (Darksoft/Widel) on its OWN ioctl index — loaded straight by
+            // ioctl_addr, no region math. Stage-1 keeps only the FIRST 256 KB (the menu lives at the
+            // start of the ROM); the !ioctl_addr[24:18] gate drops everything past 256 KB so a 1 MB
+            // ROM can't wrap over the menu. Full games need the rest -> SDRAM (Stage 2).
+            dongleprom_we   <= 1'b1;
+            dongleprom_addr <= ioctl_addr[17:0];
+            dongleprom_dout <= data;
         end
     end
 

@@ -185,7 +185,7 @@ assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
-assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
+// SDRAM pins are now driven by sdram_dongle (NeoGeo sdram.sv) — tie-off removed.
 assign FB_FORCE_BLANK = '0;
 
 assign VGA_F1 = '0;
@@ -321,6 +321,7 @@ wire        ioctl_wr;
 wire [24:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_din;
+wire        ioctl_wait;   // throttles HPS ROM download while a DDR3 dongle write is in flight
 
 wire [15:0] joystick_0, joystick_1;
 wire [15:0] joystick_r_analog_0;   // right analog stick: [15:8]=Y signed, [7:0]=X signed
@@ -351,6 +352,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_dout(ioctl_dout),
 	.ioctl_din(ioctl_din),
 	.ioctl_index(ioctl_index),
+	.ioctl_wait(ioctl_wait),
 
 	.joystick_0(joystick_0),
 	.joystick_1(joystick_1),
@@ -408,7 +410,7 @@ wire [7:0] game_id_byte;
 wire [7:0] swap_mode_byte;
 wire [7:0] game_id   = game_id_byte;         // 2026-05-30: full 8-bit = DECO release number (was [3:0])
 wire [3:0] swap_mode = swap_mode_byte[3:0];  // From metadata $02E02 (was sw[1])
-wire [2:0] dongle_type = dongle_type_byte[2:0];
+wire [3:0] dongle_type = dongle_type_byte[3:0];   // 7 = Darksoft multigame (widened from [2:0])
 
 // =========================================================================
 // ROM LOADER (task 25)
@@ -421,7 +423,7 @@ wire [7:0]  bios_dout_rom, abios_dout_rom, mcurom_dout;
 wire        palprom_we;
 wire [7:0]  palprom_addr, palprom_dout;
 wire        dongleprom_we;
-wire [11:0] dongleprom_addr;
+wire [17:0] dongleprom_addr;   // widened for the 256 KB multigame dongle (loaded via ioctl index 1)
 wire [7:0]  dongleprom_dout;
 
 rom_loader rom_loader_inst (
@@ -941,7 +943,7 @@ tape_streamer tape_streamer_inst (
 // =========================================================================
 // DONGLES (task 18 — mux; tasks 19-22 — type implementations)
 // =========================================================================
-wire [11:0] dprom_addr;       // 12-bit (4 KB) — Type 3 needs full width
+wire [19:0] dprom_addr;       // 20-bit (1 MB) for the Darksoft multigame; legacy types use low bits
 wire [7:0]  dprom_q;
 
 dongle_mux dongle_mux_inst (
@@ -990,20 +992,116 @@ assign dongle_din_low4 = dongle_din_full[3:0];
 // assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle : dongle_din_full;                       // pre-fix (raw)
 // assign e5xx_to_cpu = (rt_seen05E2 && cpu_addr[1:0] == 2'b00) ? 8'h00                     // E500-ZERO-TEST (proven boot)
 //                    : (cpu_addr[1] ? e5xx_dongle : dongle_din_full);
-assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle
-                   : (mcu_host_sts[0] ? dongle_din_full : 8'h00);   // OBF-gate: DATA when OBF=1, else 0
+// E5XX-STATUS-ROUTING-FIX-2026-06-10: MAME decocass_e5xx_r returns the 8041/tape STATUS for $E5x2/3 on ALL dongle
+// types incl. Darksoft (darksoft_r is the ELSE branch = offset 0/1 only; decocass_m.cpp:1200,1229). The "darksoft
+// owns ALL $E5xx" bypass returned 0xFF for $E5x2/3 — boots the menu but STARVES the game LOAD (which polls $E5x2/3
+// for REQ/EOT/ERR). Route STATUS to ALL types; dongle only on $E5x0/1. Half-fix/half-experiment: if the MENU
+// regresses, that pins the real bug on our 8041 Darksoft STATUS — the SAME status path as the cassette block-15 freeze.
+// DIAG-REVERT-2026-06-10: bypass below, uncomment to restore the menu-booting state:
+// assign e5xx_to_cpu = (dongle_type == 4'd7) ? dongle_din_full
+//                    : cpu_addr[1] ? e5xx_dongle
+//                    : (mcu_host_sts[0] ? dongle_din_full : 8'h00);
+assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+                   : (dongle_type == 4'd7) ? dongle_din_full             // $E5x0/1 = Darksoft dongle (raw)
+                   : (mcu_host_sts[0] ? dongle_din_full : 8'h00);        // $E5x0/1 = legacy OBF-gated 8041 data
 
-// Dongle PROM (4 KB, shared across types 2-5; Type 3 needs full 4 KB).
-// During load: rom_loader drives dongleprom_addr; during run: dongle_mux drives dprom_addr.
-wire [11:0] dongleprom_addr_eff = dongleprom_we ? dongleprom_addr : dprom_addr;
+// UNIFIED dongle storage: ALL dongle types read from DDR3 (below). The legacy 4 KB BRAM is gone.
+assign dprom_q = dprom_q_ddr;
 
-spram #(.address_width(12), .data_width(8)) dongle_prom (
-	.clock     (clk_sys),
-	.enable    (1'b1),
-	.address   (dongleprom_addr_eff),
-	.data      (dongleprom_dout),
-	.wren      (dongleprom_we),
-	.q         (dprom_q)
+// ============================================================================
+// DDR3 dongle storage (Stage 2) — full 1 MB multigame dongle ROM via Sorgelig ddram.sv (rtl/mem/ddram.sv).
+// Runs on clk_sys (= DDRAM_CLK) -> no clock-domain crossing. DDR byte address = dongle offset (base 0).
+//  LOAD: ioctl index 1 streamed to DDR3, HPS throttled by ioctl_wait while each write is in flight.
+//  READ: prefetch the byte at dprom_addr whenever it changes; the 6502 reads far slower than DDR latency.
+// ============================================================================
+assign DDRAM_CLK = clk_sys;
+wire ddr_loading = ioctl_download;
+
+// SDRAM-POR-2026-06-10: the dongle load FSM, the SDRAM controller's .init, AND the swatch capture flags must
+// reset ONLY at FPGA config — NOT on status[0]/RESET/ioctl_download. PROOF they must: Row B b0 ("ioctl_download
+// seen") read 0 while b6 ("dongle_type==7") read 1 — impossible unless a reset WIPED the sticky flags AFTER the
+// download. That reset (RESET|status0|buttons1, asserted during/after the load per MiSTer "reset on ROM load")
+// was holding the load FSM in reset through the WHOLE download (no writes landed) AND re-initing the SDRAM after.
+// A one-time power-on reset fixes both: the load path runs through the load, SDRAM retains data across a game
+// reset (no re-download), and the swatch captures download-time events without being wiped.
+// (Earlier SDRAM-LOAD-RESET only dropped ioctl_download from this reset — not enough; status[0]/RESET also hit it.)
+reg [3:0] sdram_por_cnt = 4'd0;
+wire      sdram_ld_reset = ~&sdram_por_cnt;   // high ~15 clk_sys cycles after config, then low FOREVER
+always @(posedge clk_sys) if (sdram_ld_reset) sdram_por_cnt <= sdram_por_cnt + 1'b1;
+
+// DONGLE-INDEX1-REVERT-2026-06-10: dongle ROM back on its OWN ioctl_index==1 (matches rom_loader.v:164 + the
+// MRA's original layout). The "index-0 @ $3000" experiment was a wrong turn taken off a MASKED c5 gauge — user
+// confirms index 1 was never the problem. Stream is 0-based, so the dongle offset = ioctl_addr directly.
+wire        dongle_ld      = (ioctl_index == 8'd1);
+wire [27:0] dongle_ld_addr = {3'd0, ioctl_addr};
+
+reg  [26:1] sd_addr;
+reg  [15:0] sd_din;
+reg  [1:0]  sd_bs;
+reg         sd_rd, sd_wr, sd_refresh, sd_busy, sd_was_rd;
+reg         sd_old_ready;   // SDRAM-HS-FIX-2026-06-10: track ready edges for the accept/complete handshake
+reg  [9:0]  sd_refresh_cnt;
+reg  [19:0] sd_last_addr;
+reg  [7:0]  dprom_q_ddr;     // latched dongle byte (read result) — feeds dprom_q above
+wire        sd_ready;
+wire [15:0] sd_dout;
+
+// Throttle the HPS while a dongle write is requested/in-flight (combinational so it lands in time).
+assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld);
+
+// SDRAM-HS-FIX-2026-06-10: proper ready-EDGE handshake — mirrors NeoGeo sdram_mux.sv, which drives this
+// byte-identical Sorgelig controller. The OLD `else if (sd_ready)` sampled the controller's IDLE ready=1 the
+// cycle AFTER issuing — before the op was even accepted — so reads latched STALE sd_dout (always FF, swatch
+// c7=0) and writes freed sd_busy early (HPS throttle released too soon -> bytes dropped). Correct sequence:
+// HOLD rd/wr until the controller accepts (ready 1->0), then COMPLETE (latch read data / free busy) when ready
+// returns HIGH with the strobe already cleared. Refresh = a one-edge TOGGLE (fire-and-forget, no busy wait).
+always @(posedge clk_sys) begin
+	if (sdram_ld_reset) begin   // SDRAM-LOAD-RESET-2026-06-10: NOT `reset` — must run during ioctl_download
+		sd_rd <= 0; sd_wr <= 0; sd_refresh <= 0; sd_busy <= 0; sd_was_rd <= 0;
+		sd_last_addr <= 20'hFFFFF; sd_refresh_cnt <= 0; sd_old_ready <= 1'b1;
+	end else begin
+		sd_refresh_cnt <= sd_refresh_cnt + 1'b1;
+		sd_old_ready   <= sd_ready;
+
+		// Controller accepted the request (ready fell 1->0): drop the strobe so the op runs exactly once.
+		if (sd_old_ready && !sd_ready) begin
+			sd_rd <= 0;
+			sd_wr <= 0;
+		end
+
+		if (sd_busy) begin
+			// rd/wr COMPLETE = ready back HIGH with the strobe already cleared (it fell, then rose).
+			if (sd_ready && !sd_rd && !sd_wr) begin
+				if (sd_was_rd) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
+				sd_busy <= 0;
+			end
+		end else begin
+			if (ioctl_wr && dongle_ld) begin                       // LOAD: byte -> 16-bit SDRAM
+				sd_addr  <= dongle_ld_addr[20:1];
+				sd_din   <= {ioctl_dout, ioctl_dout};
+				sd_bs    <= dongle_ld_addr[0] ? 2'b10 : 2'b01;     // high/low byte lane
+				sd_wr    <= 1; sd_busy <= 1; sd_was_rd <= 0;
+			end else if (!ioctl_download && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
+				sd_last_addr <= dprom_addr[19:0];
+				sd_addr  <= {7'd0, dprom_addr[19:1]};
+				sd_rd    <= 1; sd_busy <= 1; sd_was_rd <= 1;
+			end else if (&sd_refresh_cnt) begin                    // periodic AUTO_REFRESH: one-edge toggle
+				sd_refresh <= ~sd_refresh;
+			end
+		end
+	end
+end
+
+sdram sdram_dongle (
+	.init       (sdram_ld_reset),   // SDRAM-LOAD-RESET-2026-06-10: init early, stay ready through ioctl_download
+	.clk        (clk_sys),
+	.SDRAM_DQ   (SDRAM_DQ),   .SDRAM_A    (SDRAM_A),    .SDRAM_DQML (SDRAM_DQML), .SDRAM_DQMH (SDRAM_DQMH),
+	.SDRAM_BA   (SDRAM_BA),   .SDRAM_nCS  (SDRAM_nCS),  .SDRAM_nWE  (SDRAM_nWE),  .SDRAM_nRAS (SDRAM_nRAS),
+	.SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (SDRAM_CLK),  .SDRAM_EN   (1'b1),
+	.sel        (1'b1),
+	.addr       (sd_addr),    .dout (sd_dout), .din (sd_din),
+	.wr         (sd_wr),      .bs   (sd_bs),   .rd  (sd_rd),  .ready (sd_ready), .refresh (sd_refresh),
+	.cpsel (1'b0), .cpaddr (26'd0), .cpdin (16'd0), .cprd (), .cpreq (1'b0), .cpbusy ()
 );
 
 // =========================================================================
@@ -1013,8 +1111,18 @@ wire [7:0]  input_q;
 
 // Prepare input signals from joysticks/buttons (inverted per MAME)
 wire [7:0] in0, in1, in2;
-assign in0 = {2'b11, ~joystick_0[5:0]};         // P1: bits[5:0]=R/L/U/D/B1/B2
-assign in1 = {2'b11, ~joystick_1[5:0]};         // P2: bits[5:0]=R/L/U/D/B1/B2
+// CONTROLS-ACTIVEHIGH-FIX-2026-06-10: MAME decocass IN0/IN1 are ACTIVE-HIGH (decocass.cpp:154-159, IP_ACTIVE_HIGH;
+// bit0=R 1=L 2=U 3=D 4=B1 5=B2, bits6-7 UNUSED). Ours was ~joystick = active-low, so IDLE read as "all pressed" ->
+// menu inputs felt "stuck on" / wouldn't settle (user symptom: moves the right direction but won't stick). Directions
+// already map 1:1 (user-confirmed correct), so ONLY the polarity (+ unused [7:6] -> 0) changes. in2 left as-is.
+// ORIGINAL (active-low = stuck-on), uncomment to restore:
+// assign in0 = {2'b11, ~joystick_0[5:0]};
+// assign in1 = {2'b11, ~joystick_1[5:0]};
+// CONTROLS-UD-SWAP-2026-06-10: MiSTer joystick [3]=Up/[2]=Down, MAME IN0 bit2=Up/bit3=Down (decocass.cpp:156-157)
+// -> swap joystick bits 2,3 into in0[2]/[3]. (User after the active-high fix: "up is down, down is up".)
+// Pre-swap: assign in0 = {2'b00, joystick_0[5:0]};  /  assign in1 = {2'b00, joystick_1[5:0]};
+assign in0 = {2'b00, joystick_0[5:4], joystick_0[2], joystick_0[3], joystick_0[1:0]};  // P1 R/L/U/D/B1/B2 active-high, U/D fixed
+assign in1 = {2'b00, joystick_1[5:4], joystick_1[2], joystick_1[3], joystick_1[1:0]};  // P2 R/L/U/D/B1/B2 active-high, U/D fixed
 assign in2 = {~joystick_0[6], ~joystick_1[6], 1'b0,
               joystick_0[8]|joystick_1[8], joystick_0[7]|joystick_1[7], 3'b000}; // Coins, starts (stray '-' from HEAD removed)
 
@@ -1427,6 +1535,47 @@ always @(posedge clk_sys) begin
 	end
 end
 
+// WRITE-PATH-PROBE-2026-06-10 (rev2, index-aware): Row B = does the dongle reach the SDRAM writer, and on which
+// ioctl_index (sticky, cleared on sdram_ld_reset so it captures DURING the download). cell0=bit0=LSB, white=set:
+//  b0 ioctl_download | b1 ioctl_wr | b2 ioctl_wr & index==0 | b3 ioctl_wr & index==1 | b4 ioctl_wr & index>=2 |
+//  b5 ioctl_addr>=$80000 (download reached 512 KB+) | b6 dongle_type==7 | b7 ioctl_wr & dongle_ld (= the sd_wr trigger)
+// Decode (dongle now expected on index 1): b1=0 -> FSM never sees ioctl_wr (domain/wiring); b3=1 -> dongle DOES
+// arrive as index 1 (so if c5 still 0, the FSM/handshake is the bug, not the index); b3=0 & b4=1 -> dongle comes in
+// at a DIFFERENT index (read its bucket); b3=0 & b4=0 -> dongle ROM not downloaded at all (file missing/zip);
+// b5=0 -> download truncated before 512 KB; b7 should track c5.
+reg wp0,wp1,wp2,wp3,wp4,wp5,wp6,wp7;
+always @(posedge clk_sys) begin
+	if (sdram_ld_reset) {wp7,wp6,wp5,wp4,wp3,wp2,wp1,wp0} <= 8'd0;
+	else begin
+		if (ioctl_download)                       wp0 <= 1'b1;
+		if (ioctl_wr)                             wp1 <= 1'b1;
+		if (ioctl_wr && ioctl_index==8'd0)        wp2 <= 1'b1;
+		if (ioctl_wr && ioctl_index==8'd1)        wp3 <= 1'b1;
+		if (ioctl_wr && ioctl_index>=8'd2)        wp4 <= 1'b1;
+		if (ioctl_wr && ioctl_addr>=25'h80000)    wp5 <= 1'b1;
+		if (dongle_type==4'd7)                    wp6 <= 1'b1;
+		if (ioctl_wr && dongle_ld)                wp7 <= 1'b1;
+	end
+end
+wire [7:0] write_path_flags = {wp7,wp6,wp5,wp4,wp3,wp2,wp1,wp0};
+
+// DONGLE-BYTE0-PROBE-2026-06-10: Row B = the dongle byte the 6502 actually reads at offset 0 (the "DECO" signature
+// byte at donglerom[0]). EXPECT 0x44 ('D') if SDRAM load + read delivery are correct. 0x45/0x43/0x4F = off-by-one
+// shift; 0x00 = stale/prefetch-race (read beat the SDRAM fetch); 0xFF = open bus. Fires ONCE, on the first $E500
+// read while the dongle counter (dprom_addr) is still 0; latch inits 0x00 (all-dark Row B = never fired = BIOS
+// didn't read offset 0 via $E500). Captures dprom_q_ddr = exactly what the 6502 sees at $E500 (off0 -> prom_q).
+reg [7:0] diag_d0byte;
+reg       diag_d0byte_cap;
+always @(posedge clk_sys) begin
+	if (sdram_ld_reset) begin
+		diag_d0byte     <= 8'h00;
+		diag_d0byte_cap <= 1'b0;
+	end else if (!diag_d0byte_cap && cpu_re_e5xx && cpu_addr == 16'hE500 && dprom_addr == 20'd0) begin
+		diag_d0byte     <= dprom_q_ddr;
+		diag_d0byte_cap <= 1'b1;
+	end
+end
+
 // TRANSPORT-PROBE-2026-06-08 (rev2 — LIVE signals; the milestone-flag version was UNRELIABLE and is removed).
 // The reset's SLOWDOWN = the 8041's $0BC hole-seek retry loop: it drives the tape FORWARD and waits for a
 // P2.5 (=tape_bot|tape_eot) edge inside a timer window, retries 200x2, then logs $08. EOT geometry matches
@@ -1558,10 +1707,35 @@ wire       diag_gap  = (diag_x[3:0] >= 4'd14);              // 2px gap between c
 //          c3 motor_on | c4 direction(1=fwd) | c5 fast | c6 clk_tog(in DATA) | c7 data_tog
 //   Row B ($E500 byte): the value the BIOS trips on at $0582 (proven = STATUS reg, not error/data).
 //   RESET-TRACE rt_* and the milestone block remain as plumbing (rt_seen05E2 gates E500-ZERO-TEST).
-wire       diag_rowA = (vcnt >= 9'd16) && (vcnt < 9'd32);    // eot_flags (LIVE transport state)
-wire       diag_rowB = (vcnt >= 9'd40) && (vcnt < 9'd56);    // $E500 byte
-wire       diag_lit  = (diag_rowA && eot_flags[diag_cell]) |
-                       (diag_rowB && diag_e500_err[diag_cell]);
+wire       diag_rowA = (vcnt >= 9'd16) && (vcnt < 9'd32);    // DARKSOFT-PC-PROBE: 6502 PC[15:8] (high byte)
+wire       diag_rowB = (vcnt >= 9'd40) && (vcnt < 9'd56);    // DARKSOFT-PC-PROBE: 6502 PC[7:0] (low byte = loop position)
+// SWATCH-DARKSOFT: Row A = sticky darksoft boot flags (cell0=bit0=LSB, white=set):
+//  c0 6502 fetched BIOS ($Fxxx) | c1 6502 hit $E5xx | c2 dongle read | c3 dongle write |
+//  c4 SDRAM ready | c5 SDRAM written | c6 dongle byte!=00 | c7 dongle byte!=FF
+reg dk0,dk1,dk2,dk3,dk4,dk5,dk6,dk7;
+always @(posedge clk_sys) begin
+	// SWATCH-C5-UNMASK-2026-06-10: clear on sdram_ld_reset (NOT `reset`) — `reset` includes ioctl_download,
+	// which zeroed these EVERY cycle of the download, so c5 (sd_wr, fires ONLY during the load) could never latch.
+	if (sdram_ld_reset) {dk7,dk6,dk5,dk4,dk3,dk2,dk1,dk0} <= 8'd0;
+	else begin
+		if (cpu_addr[15:12]==4'hF) dk0 <= 1'b1;
+		if (cpu_addr[15:8]==8'hE5) dk1 <= 1'b1;
+		if (dongle_re)             dk2 <= 1'b1;
+		if (dongle_we)             dk3 <= 1'b1;
+		if (sd_ready)              dk4 <= 1'b1;
+		if (sd_wr)                 dk5 <= 1'b1;
+		if (dprom_q_ddr != 8'h00)  dk6 <= 1'b1;
+		if (dprom_q_ddr != 8'hFF)  dk7 <= 1'b1;
+	end
+end
+wire [7:0] dark_flags = {dk7,dk6,dk5,dk4,dk3,dk2,dk1,dk0};
+// DARKSOFT-PC-PROBE-2026-06-10: Row A = 6502 PC[15:8], Row B = PC[7:0] (live opcode-fetch PC, latched on cpu_sync
+// via diag_pc_live @~L1440). At the "Loading..." lock the PC settles into the hang loop -> read both bytes, map to
+// decodark.dasm. cell0=LEFT=bit0. Row A ~ $Fx = still in BIOS loader; $0x/$1x/$5x high byte = game ran + hung in RAM.
+wire [7:0] diag_pc_hi = diag_pc_live[15:8];
+wire [7:0] diag_pc_lo = diag_pc_live[7:0];
+wire       diag_lit  = (diag_rowA && diag_pc_hi[diag_cell]) |
+                       (diag_rowB && diag_pc_lo[diag_cell]);
 wire       diag_show = (diag_rowA | diag_rowB) && diag_in && !diag_gap;
 // Overlay ON (bands over the running game; E500-ZERO-TEST keeps it booting). To hide for clean shots, swap
 // to pass-through: comment the 3 diag_show lines, uncomment the 3 core_* lines.

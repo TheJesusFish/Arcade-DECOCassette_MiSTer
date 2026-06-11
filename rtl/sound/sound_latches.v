@@ -77,7 +77,13 @@ module sound_latches (
         main_din_e700 = soundlatch2;
 
         // $E701: return sound_ack register
-        main_din_e701 = sound_ack;
+        // AUDIO-ACK-BYPASS-2026-06-10: force D7 (sound-cmd-pending) = 0 so the BIOS load loops
+        // (`bit $e701 / bmi` at cassette $F104 and darksoft $F9BF) DON'T hang waiting for the audio CPU
+        // to ACK a sound command — our audio CPU never consumes $A000, so D7 stays stuck = the universal
+        // "Loading..." freeze (block-15 cassette + every darksoft game). PROVES the root + gives playable
+        // (silent) loads. DIAG-REVERT-2026-06-10: restore `main_din_e701 = sound_ack;` once audio actually acks.
+        // main_din_e701 = sound_ack;                  // original
+        main_din_e701 = {1'b0, sound_ack[6:0]};         // D7 forced 0
 
         // $A000: return soundlatch (main → audio command)
         audio_din_a000 = soundlatch;
