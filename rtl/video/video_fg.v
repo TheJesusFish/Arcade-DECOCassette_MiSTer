@@ -56,8 +56,14 @@ module video_fg (
     // ========================================
     // Internal timing extraction
     // ========================================
-    wire [4:0] htile = hcnt[7:3]; // tile column index (5 bits, 0..31)
-    wire [4:0] vtile = vcnt[7:3]; // tile row index
+    // FG-HSHIFT-TEST-2026-06-11: ROTATION CORRECTION. Display is rotated 90° → display-VERTICAL = raster-HORIZONTAL
+    // (hcnt). Direction confirmed DOWN. hcnt+14 overshot; user wants ONE TILE (8px), tile-aligned — so shift htile
+    // by +8 (=+1 tile) and keep the natural `hcnt[2:0]==0` load phase (no sub-tile shift). Tunable by whole tiles.
+    // DIAG-REVERT-2026-06-11: restore `htile = hcnt[7:3]`.
+    wire [8:0] hcnt_fg = hcnt + 9'd8;
+    // wire [4:0] htile = hcnt[7:3];          // tile column index (original, no shift)
+    wire [4:0] htile = hcnt_fg[7:3]; // tile column index (shifted)
+    wire [4:0] vtile = vcnt[7:3]; // tile row index (vcnt shift REVERTED — was the wrong axis)
     wire [2:0] vline = vcnt[2:0]; // scan line within 8-line char
 
     // ========================================
@@ -146,6 +152,8 @@ module video_fg (
 
     always @(posedge clk_sys) begin
         if (ce_pix) begin
+            // FG-HSHIFT-TEST-2026-06-11: tile-aligned shift — the +8 htile shift is a whole tile, so load on the
+            // NATURAL hcnt phase (no sub-tile load shift needed).
             if (hcnt[2:0] == 3'b000) begin
                 // Load new 8-pixel char line
                 pat_p0_sr <= char_p0;

@@ -32,7 +32,8 @@ module ay8910_pair (
     input  wire        ay2_addr_we,        // strobed when audio writes $8xxx
     input  wire [7:0]  audio_dout,
 
-    output wire [15:0] sound_out           // mixed, signed
+    output wire [15:0] sound_out,          // mixed, signed
+    output wire        dbg_ay_pulse        // AUDIO-ALIVE-PROBE-2026-06-11: jt49 write pulse fired (either chip)
 );
 
     // ========================================================================
@@ -93,21 +94,33 @@ module ay8910_pair (
             ay1_data_we_r <= ay1_data_we;
             ay2_data_we_r <= ay2_data_we;
 
+            // AY-PULSE-FIX-2026-06-11: the `ce_audio &&` gate made this never fire. ay*_data_we_r
+            // registers EVERY clk_sys, so the fresh rising edge (`ay*_data_we & ~ay*_data_we_r`) exists
+            // only on the clk_sys cycle right after the write decode goes high -- by which point ce_audio
+            // (high 1-of-192 cycles) is already low. Result: ay*_pulse ~never set -> jt49 never saw a
+            // write -> silent. Drop the gate so the pulse sets on the rising edge regardless of phase; it
+            // still clears on the next ce_hclk2 (jt49 then sees exactly one cs_n/wr_n strobe).
+            // DIAG-REVERT-2026-06-11: restore the `ce_audio &&` form (commented) to revert.
             // Edge detect: rising edge of ay1_data_we sets pulse flag
-            if (ce_audio && ay1_data_we && ~ay1_data_we_r) begin
+            // if (ce_audio && ay1_data_we && ~ay1_data_we_r) begin
+            if (ay1_data_we && ~ay1_data_we_r) begin
                 ay1_pulse <= 1'b1;
             end else if (ce_hclk2) begin
                 ay1_pulse <= 1'b0;
             end
 
             // Same for ay2
-            if (ce_audio && ay2_data_we && ~ay2_data_we_r) begin
+            // if (ce_audio && ay2_data_we && ~ay2_data_we_r) begin
+            if (ay2_data_we && ~ay2_data_we_r) begin
                 ay2_pulse <= 1'b1;
             end else if (ce_hclk2) begin
                 ay2_pulse <= 1'b0;
             end
         end
     end
+
+    // AUDIO-ALIVE-PROBE-2026-06-11: expose pulse for the swatch (revert: delete this line + the port).
+    assign dbg_ay_pulse = ay1_pulse | ay2_pulse;
 
     // ========================================================================
     // jt49 #1 instantiation
@@ -183,7 +196,12 @@ module ay8910_pair (
 
     wire [10:0] ay_sum = {1'b0, ay1_sound} + {1'b0, ay2_sound};
     wire [10:0] ay_centered = ay_sum - 11'd1024;
-    wire signed [15:0] sound_mixed = {{5{ay_centered[10]}}, ay_centered};  // sign-extend
+    // VOL-FIX-2026-06-11: the old sign-extend left the signal at ~±1024 in a 16-bit field (near-silent).
+    // Scale to full range: signed(ay_centered) << 5 == {ay_centered, 5'b0} (bit10 lands in bit15 as the
+    // sign). Range -1024..1022 -> -32768..32704, no overflow.
+    // DIAG-REVERT-2026-06-11: restore the sign-extend line (commented) below to revert.
+    // wire signed [15:0] sound_mixed = {{5{ay_centered[10]}}, ay_centered};  // sign-extend (quiet)
+    wire signed [15:0] sound_mixed = {ay_centered, 5'b0};                    // <<5 to full-scale
 
     // ========================================================================
     // Low-pass filter

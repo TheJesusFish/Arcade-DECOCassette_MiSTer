@@ -82,8 +82,14 @@ module sound_latches (
         // to ACK a sound command — our audio CPU never consumes $A000, so D7 stays stuck = the universal
         // "Loading..." freeze (block-15 cassette + every darksoft game). PROVES the root + gives playable
         // (silent) loads. DIAG-REVERT-2026-06-10: restore `main_din_e701 = sound_ack;` once audio actually acks.
-        // main_din_e701 = sound_ack;                  // original
-        main_din_e701 = {1'b0, sound_ack[6:0]};         // D7 forced 0
+        // AUDIO-ACK-REAL-2026-06-11: override REMOVED — the audio CPU now executes cleanly (AUDIO-BRAM-READ-FIX)
+        // and reads $A000 to clear D7 reliably, so the REAL ack works. The bypass wasn't just cosmetic: forcing
+        // D7=0 BROKE in-game sound. The main BIOS streams the audio engine to the audio CPU and waits on D7
+        // before EVERY byte (bios.dasm $F0D9/$F0EE/$F104/$F11E: `bit $e701 / bmi`); with D7 faked to 0 it never
+        // waited and blasted the download -> dropped nibbles -> corrupt RAM engine -> NMI never armed -> SILENT.
+        // DIAG-REVERT-2026-06-11: to restore the bypass, swap the two lines below.
+        // main_din_e701 = {1'b0, sound_ack[6:0]};     // AUDIO-ACK-BYPASS (D7 forced 0) — was breaking sound DL
+        main_din_e701 = sound_ack;                      // REAL ack (D7 now cleared by the audio CPU's $A000 read)
 
         // $A000: return soundlatch (main → audio command)
         audio_din_a000 = soundlatch;

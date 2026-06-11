@@ -168,11 +168,16 @@ module video_missiles (
 
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            if (mis_lower_hit) begin
+            // MISSILES-NEUTER-2026-06-11: this layer is an unfinished STUB (mis_pair_idx stuck at 0; only
+            // mis_y_lower ever read; mis_x_lower/y_upper/x_upper UNINITIALIZED) → it paints garbage dots, and
+            // missiles draw ON TOP. BurgerTime has NO missiles → force it dark. DIAG-REVERT-2026-06-11: drop the `1'b0 &&`.
+            // if (mis_lower_hit) begin
+            if (1'b0 && mis_lower_hit) begin
                 // Lower missile (drawn)
                 mis_pen <= { 1'b1, color_missiles[2:0], 1'b0 };  // (color_missiles & 7) | 8
                 mis_priority <= 1'b1;  // Priority bit set (MAME: priority.pix |= 1 << 2)
-            end else if (mis_upper_hit) begin
+            // end else if (mis_upper_hit) begin
+            end else if (1'b0 && mis_upper_hit) begin
                 // Upper missile (drawn)
                 mis_pen <= { 1'b1, color_missiles[6:4], 1'b0 };  // ((color_missiles >> 4) & 7) | 8
                 mis_priority <= 1'b1;  // Priority bit set (MAME: priority.pix |= 1 << 3)

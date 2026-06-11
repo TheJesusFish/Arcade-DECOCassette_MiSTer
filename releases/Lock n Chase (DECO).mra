@@ -17,9 +17,10 @@
 
   Type-1 swap behavior is implemented in dongle_type1.v from a per-game_id table.
   Region map matches rom_loader.v:
-    $01D00-$02CFF dongle PROM (4 KB; Type 1 PROM is 32 B padded with zeros)
-    $02E00-$02EFF metadata
+    $01D00-$02CFF dongle PROM region (UNUSED — dongle now loads via ioctl index 1 -> SDRAM; zero-filled)
+    $02E00-$02EFF metadata (index 0)
     $03000+       cassette
+  index 1: Type-1 dongle PROM (dp-1110_b.dgl, 32 B) -> SDRAM
 -->
 <misterromdescription>
     <name>Lock'n'Chase</name>
@@ -45,9 +46,8 @@
         <part name="v3.3j"  crc="51eef657"/>
         <part repeat="0xA0">00</part>
 
-        <!-- $01D00-$02CFF: Dongle PROM region (4 KB; 32 B PROM + 4064 B zero pad) -->
-        <part name="dp-1110_b.dgl" crc="e09ae5de"/>
-        <part repeat="0xFE0">00</part>
+        <!-- $01D00-$02CFF: legacy 4 KB dongle PROM region (UNUSED — dongle moved to ioctl index 1 -> SDRAM; zeros) -->
+        <part repeat="0x1000">00</part>
 
         <!-- $02D00-$02DFF: Spare -->
         <part repeat="0x100">00</part>
@@ -61,6 +61,13 @@
 
         <!-- $03000-: Cassette image -->
         <part name="clocknch.cas" crc="c9d163a4"/>
+    </rom>
+
+    <!-- DONGLE-NEW-SPACE-2026-06-11: Type-1 dongle PROM on its OWN ioctl index = 1. The wrapper reads ALL
+         dongle types from SDRAM via dongle_ld = (ioctl_index==1) (Arcade-DECOCassette.sv:1035,1084); the legacy
+         $01D00 index-0 BRAM path is gone (L1008). (Type-1 swap is game_id-driven; PROM provided for completeness.) -->
+    <rom index="1" zip="decocass.zip|clocknch.zip" md5="none">
+        <part name="dp-1110_b.dgl" crc="e09ae5de"/>
     </rom>
 
     <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>

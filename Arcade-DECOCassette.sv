@@ -1175,6 +1175,11 @@ wire [7:0]  main_to_audio_data;
 wire        audio_irq;
 reg         audio_nmi_enable_reg;   // $E416 bit 0 — main CPU's master enable for audio NMI
 
+// AUDIO-ALIVE-PROBE-2026-06-11: liveness taps from audio_cpu + ay8910_pair (revert: delete this, the
+// .dbg_* port connections, the sticky-flag block after ay8910_pair, and the swatch re-point near L1740).
+wire [15:0] aud_pc;
+wire        aud_sync, aud_nmi_n, aud_nmi_en, aud_ay_pulse;
+
 audio_cpu audio_cpu_inst (
 	.clk_sys      (clk_sys),
 	.ce_audio     (ce_audio),
@@ -1195,7 +1200,12 @@ audio_cpu audio_cpu_inst (
 	.sound_from_main_re(audio_from_main_re),
 	.sound_to_main(audio_to_main_data),
 	.sound_from_main(main_to_audio_data),
-	.audio_nmi_master_enable(audio_nmi_enable_reg)
+	.audio_nmi_master_enable(audio_nmi_enable_reg),
+	// AUDIO-ALIVE-PROBE-2026-06-11
+	.dbg_pc      (aud_pc),
+	.dbg_sync    (aud_sync),
+	.dbg_nmi_n   (aud_nmi_n),
+	.dbg_nmi_en  (aud_nmi_en)
 );
 
 // =========================================================================
@@ -1250,8 +1260,34 @@ ay8910_pair ay8910_pair_inst (
 	.ay2_data_we  (ay2_data_we),
 	.ay2_addr_we  (ay2_addr_we),
 	.audio_dout   (ay_data_out),
-	.sound_out    ({ay_right, ay_left})
+	.sound_out    ({ay_right, ay_left}),
+	.dbg_ay_pulse (aud_ay_pulse)   // AUDIO-ALIVE-PROBE-2026-06-11
 );
+
+// AUDIO-ALIVE-PROBE-2026-06-11: sticky-from-reset liveness flags + per-frame PC snapshot for the swatch.
+// Revert: delete this whole block (and the swatch re-point near L1740, the dbg_* ports/wires).
+//  aud_flags bits (swatch Row A, cell0=bit0=LSB, white=set):
+//   c0 ranBIOS($Fxxx) c1 ranRAM($0xxx) c2 nmiEN c3 nmiFIRED c4 mainIRQ c5 $A000read c6 AYwrite c7 AYpulse
+reg al_ranrom, al_ranram, al_nmien, al_nmifired, al_irq, al_a000, al_aywr, al_aypulse;
+reg [15:0] aud_pc_live, aud_pc_snap;
+always @(posedge clk_sys) begin
+	if (reset) begin
+		al_ranrom<=1'b0; al_ranram<=1'b0; al_nmien<=1'b0; al_nmifired<=1'b0;
+		al_irq<=1'b0; al_a000<=1'b0; al_aywr<=1'b0; al_aypulse<=1'b0;
+	end else begin
+		if (aud_pc[15:11]==5'h1F)                            al_ranrom   <= 1'b1;  // fetched audio BIOS $F800+
+		if (aud_pc[15:12]==4'h0)                             al_ranram   <= 1'b1;  // touched work RAM $0xxx
+		if (aud_nmi_en)                                      al_nmien    <= 1'b1;  // BIOS armed NMI ($1000-17FF)
+		if (~aud_nmi_n)                                      al_nmifired <= 1'b1;  // NMI line asserted
+		if (audio_irq)                                       al_irq      <= 1'b1;  // main sent a sound cmd
+		if (audio_from_main_re)                              al_a000     <= 1'b1;  // audio read $A000 (handshake)
+		if (ay1_data_we|ay1_addr_we|ay2_data_we|ay2_addr_we) al_aywr     <= 1'b1;  // AY register write decoded
+		if (aud_ay_pulse)                                    al_aypulse  <= 1'b1;  // jt49 saw the write pulse
+	end
+	if (aud_sync)                  aud_pc_live <= aud_pc;       // track live opcode-fetch PC
+	if (hcnt==9'd0 && vcnt==9'd8)  aud_pc_snap <= aud_pc_live;  // freeze once per frame (stable display)
+end
+wire [7:0] aud_flags = {al_aypulse, al_aywr, al_a000, al_irq, al_nmifired, al_nmien, al_ranram, al_ranrom};
 
 // =========================================================================
 // VIDEO SUBSYSTEM (tasks 07-11)
@@ -1310,6 +1346,11 @@ video_bg video_bg_inst (
 );
 
 // Sprites (task 10)
+// SPRITE-DESC-SWIZZLE-FIX-2026-06-11: the sprite descriptor mirror must be a TRUE copy of fgvideoram, which
+// applies the $C800-$CBFF mirror-swizzle (video_fg.v:71-74 / MAME mirrorvideoram_w: swap upper-5/lower-5 bits).
+// Feeding the RAW cpu_addr[9:0] left the descriptor BRAM un-swizzled → mirror-region descriptor writes landed at
+// the wrong address → garbage descriptors → garbage sprites (the top-right "numbers"). No-op for direct writes.
+wire [9:0] spr_desc_wr_addr = cpu_addr[11] ? {cpu_addr[4:0], cpu_addr[9:5]} : cpu_addr[9:0];
 video_sprites video_sprites_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
@@ -1317,7 +1358,8 @@ video_sprites video_sprites_inst (
 	.vcnt              (vcnt),
 	.color_center_bot  (color_center_bot_reg),
 	.cpu_we_spr        (cpu_we_fgvram),
-	.cpu_spr_addr      (cpu_addr[9:0]),
+	// SPRITE-DESC-SWIZZLE-FIX-2026-06-11: was `.cpu_spr_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
+	.cpu_spr_addr      (spr_desc_wr_addr),
 	.cpu_spr_dout      (cpu_dout),
 	.cpu_we_char_p0    (charram_we_p0),    // SPRITE-REWRITE-2026-06-10: charram gfx mirror (sprites share charram w/ FG)
 	.cpu_we_char_p1    (charram_we_p1),
@@ -1742,6 +1784,16 @@ wire [7:0] diag_pc_lo = diag_pc_live[7:0];
 wire       diag_lit  = (diag_rowA && diag_pc_hi[diag_cell]) |
                        (diag_rowB && diag_pc_lo[diag_cell]);
 wire       diag_show = (diag_rowA | diag_rowB) && diag_in && !diag_gap;
+// AUDIO-ALIVE-PROBE-2026-06-11: audio liveness rows (revert: delete this block + restore the pass-through
+// diag_r/g/b below). Row A (vcnt16-32)=aud_flags; Row B (40-56)=audio PC low; Row C (64-80)=audio PC high.
+wire       aud_rowC = (vcnt >= 9'd64) && (vcnt < 9'd80);
+wire       aud_lit  = (diag_rowA && aud_flags[diag_cell])      |
+                      (diag_rowB && aud_pc_snap[diag_cell])    |
+                      (aud_rowC  && aud_pc_snap[8 + diag_cell]);
+wire       aud_show = (diag_rowA | diag_rowB | aud_rowC) && diag_in && !diag_gap;
+wire [7:0] aud_diag_r = aud_show ? (aud_lit ? 8'hFF : 8'h20) : core_r;
+wire [7:0] aud_diag_g = aud_show ? (aud_lit ? 8'hFF : 8'h20) : core_g;
+wire [7:0] aud_diag_b = aud_show ? (aud_lit ? 8'hFF : 8'h20) : core_b;
 // Overlay ON (bands over the running game; E500-ZERO-TEST keeps it booting). To hide for clean shots, swap
 // to pass-through: comment the 3 diag_show lines, uncomment the 3 core_* lines.
 // wire [7:0] diag_r = core_r;
@@ -1753,6 +1805,12 @@ wire       diag_show = (diag_rowA | diag_rowB) && diag_in && !diag_gap;
 // wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
 // wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
 // wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
+// SWATCH-OFF-2026-06-11: overlay back to PASS-THROUGH (clean screen for graphics work). The audio probe
+// scaffolding (dbg taps, al_* flags, aud_diag_*) STAYS in the tree per "leave the diagnostics" — only the
+// on-screen bands are hidden. Re-show: restore the 3 aud_diag_* lines, comment the 3 core_* lines.
+// wire [7:0] diag_r = aud_diag_r;
+// wire [7:0] diag_g = aud_diag_g;
+// wire [7:0] diag_b = aud_diag_b;
 wire [7:0] diag_r = core_r;
 wire [7:0] diag_g = core_g;
 wire [7:0] diag_b = core_b;

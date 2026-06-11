@@ -177,6 +177,8 @@ module video_sprites (
 
     always @(posedge clk_sys) begin
         if (ce_pix) begin
+            // SPRITE-OFF-TEST-2026-06-11 (RESOLVED): forcing this dark proved the top-right "numbers" ARE the
+            // sprite layer (they vanished) — sprites render but mis-located/garbage. Test reverted; sprites ON.
             if (valid_r && (pen3 != 3'b000)) begin
                 spr_pen      <= {1'b0, color_center_bot[1], pen3};
                 spr_priority <= 1'b1;

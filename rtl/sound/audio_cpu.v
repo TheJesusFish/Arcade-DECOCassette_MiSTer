@@ -60,7 +60,14 @@ module audio_cpu (
     // was therefore non-functional, leaving the main CPU's $E416 write
     // ignored. This could cause sound-ack timing weirdness and potentially
     // hang BIOS waiting on audio responses.
-    input  wire        audio_nmi_master_enable
+    input  wire        audio_nmi_master_enable,
+
+    // AUDIO-ALIVE-PROBE-2026-06-11: liveness taps for the wrapper swatch.
+    // Revert: delete these 4 ports + the assign block near endmodule, and the .dbg_* connections in the wrapper.
+    output wire [15:0] dbg_pc,        // current bus address (= PC at opcode fetch)
+    output wire        dbg_sync,      // opcode-fetch strobe (T65 Sync)
+    output wire        dbg_nmi_n,     // NMI line, active low
+    output wire        dbg_nmi_en     // audio_nmi_enabled_r (BIOS armed NMI via $1000-17FF)
 );
 
     // ========================================================================
@@ -155,7 +162,12 @@ module audio_cpu (
     wire rom_sel         = (cpu_addr[15:11] == 5'h1F);    // $F800-$FFFF
 
     // More precise decode within $1000-$1FFF
-    wire nmi_enable_reg_sel = (cpu_addr[15:8] == 8'h10); // $1000-$17FF
+    // AUDIO-DECODE-WIDEN-2026-06-11: MAME arms audio NMI on ANY access to the FULL $1000-$17FF window
+    // (decocass_m.cpp). The old `==8'h10` matched only $1000-$10FF, so a BIOS NMI-enable touch above
+    // $10FF was missed -> NMI never armed -> silent audio CPU. Widen to $1000-$17FF (addr[15:11]==00010).
+    // DIAG-REVERT-2026-06-11: restore the narrow line (commented) below; comment the wide one.
+    // wire nmi_enable_reg_sel = (cpu_addr[15:8] == 8'h10);    // narrow: only $1000-$10FF (WRONG)
+    wire nmi_enable_reg_sel = (cpu_addr[15:11] == 5'b00010);   // $1000-$17FF
     wire sound_ack_rst_sel  = (cpu_addr[15:8] == 8'h18); // $1800-$1FFF
 
     // ========================================================================
@@ -204,7 +216,14 @@ module audio_cpu (
         .init_file("")
     ) work_ram (
         .clock   (clk_sys),
-        .enable  (ram_enable && ce_audio),
+        // AUDIO-BRAM-READ-FIX-2026-06-11: drop the `&& ce_audio` enable gate. Gating the BRAM enable with
+        // ce_audio updates q ONLY on the ce edge (the same edge T65 changes the address) -> the CPU can latch a
+        // STALE byte (off-by-one-ce read) -> GARBLED execution (Darksoft ran a garbled reset: no AY-init writes,
+        // PC wandering in ROM fill). Un-gated: q tracks the (CE-stable) address every clk_sys, fresh by the next
+        // ce; writes are idempotent (same addr/data held across the window). DIAG-REVERT-2026-06-11: restore
+        // `.enable  (ram_enable && ce_audio),`.
+        // .enable  (ram_enable && ce_audio),
+        .enable  (1'b1),
         .address (addr_12),
         .data    (cpu_do),
         .q       (ram_dout),
@@ -231,7 +250,11 @@ module audio_cpu (
         .q_a      (),
 
         .clock_b  (clk_sys),
-        .enable_b (rom_sel && ce_audio),
+        // AUDIO-BRAM-READ-FIX-2026-06-11: same stale-read fix as work_ram — un-gate the CPU ROM read so the
+        // instruction byte at cpu_addr is fresh by the ce edge T65 samples it (was off-by-one-ce -> garbled
+        // BIOS). DIAG-REVERT-2026-06-11: restore `.enable_b (rom_sel && ce_audio),`.
+        // .enable_b (rom_sel && ce_audio),
+        .enable_b (1'b1),
         .wren_b   (1'b0),
         .address_b(rom_addr_r),
         .data_b   (8'h00),
@@ -254,5 +277,11 @@ module audio_cpu (
     // Currently using audio_nmi_enabled_r initialized to 0. Hardware may
     // have a separate reset path. If audio NMI enable persists across resets,
     // remove the reset logic for audio_nmi_enabled_r above.
+
+    // AUDIO-ALIVE-PROBE-2026-06-11: drive the liveness taps (revert: delete this block + the 4 ports above).
+    assign dbg_pc     = cpu_addr;
+    assign dbg_sync   = cpu_sync;
+    assign dbg_nmi_n  = cpu_nmi_n;
+    assign dbg_nmi_en = audio_nmi_enabled_r;
 
 endmodule
