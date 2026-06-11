@@ -1319,6 +1319,11 @@ video_sprites video_sprites_inst (
 	.cpu_we_spr        (cpu_we_fgvram),
 	.cpu_spr_addr      (cpu_addr[9:0]),
 	.cpu_spr_dout      (cpu_dout),
+	.cpu_we_char_p0    (charram_we_p0),    // SPRITE-REWRITE-2026-06-10: charram gfx mirror (sprites share charram w/ FG)
+	.cpu_we_char_p1    (charram_we_p1),
+	.cpu_we_char_p2    (charram_we_p2),
+	.cpu_char_addr     (cpu_addr[12:0]),
+	.cpu_char_dout     (cpu_dout),
 	.spr_pen           (spr_pen),
 	.spr_priority      (spr_opaque)
 );

@@ -1,19 +1,31 @@
-// DECO Cassette — Sprite layer renderer (task 10, phase 07+)
-// Fetches and renders 8x 16×16 2bpp sprites from fgvideoram descriptors.
+// DECO Cassette — Sprite layer renderer  (REWRITE 2026-06-10 — the prior version was a non-functional stub:
+// empty gfx BRAMs, descriptor code/X/Y never read, no slot iteration → sprites invisible in every game.)
 //
-// Based on MAME decocass_v.cpp:524-569 (draw_sprites).
-// Sprite RAM location confirmed: m_fgvideoram (same as FG tilemap) per line 774.
-// Descriptor stride: interleave = 0x20 (32 bytes).
-// Sprite layout (8 sprites):
-//   Offset = 28*0x20 - i*4*0x20 (i=0..7), so backwards iteration
-//   Each sprite occupies 4 interleaved 16-bit words:
-//     [offs + 0*0x20]: flags byte (bit 0 = enable, bits [2:1] = flipx/flipy)
-//     [offs + 1*0x20]: sprite code (character index into gfxdecode)
-//     [offs + 2*0x20]: Y position (240 - pos)
-//     [offs + 3*0x20]: X position (240 - pos)
-// Color bank: ((color_center_bot >> 1) & 1) selects one of 2 palette banks (2 bits of pen selection).
-// Sprite y_adjust = 0 per screen_update_decocass (line 774).
-// Render: per-line scan across all sprite slots, draw 16×16 at (sx, sy).
+// 8 sprites, 16×16, 3bpp, descriptors interleaved in fgvideoram, graphics shared with the chars in charram.
+// References:
+//   MAME decocass_v.cpp:524-569  draw_sprites
+//   MAME decocass.cpp:950-959     spritelayout (16,16, 256, planes=3, the offsets below)
+//
+// DESCRIPTORS (in fgvideoram — mirrored here via the CPU write port). 8 slots, base offs = 28*0x20 = 0x380,
+// stepping DOWN by 4*0x20 = 0x80 each slot (slot 0 = 0x380 … slot 7 = 0x000). Per slot, interleave 0x20:
+//   [offs+0x00] flags : bit0 = enable, bit1 = flipy, bit2 = flipx
+//   [offs+0x20] code  : 0..255  (index into the 16×16 sprite set in charram)
+//   [offs+0x40] Y     : sy = 240 - Y
+//   [offs+0x60] X     : sx = 240 - X
+// Draw order slot 0→7 with later overwriting earlier ⇒ slot 7 (offs 0x000) is on top (MAME draws it last).
+//
+// GRAPHICS (gfx1 == charram $6000, same RAM as the FG chars — mirrored here via the charram write ports).
+// spritelayout: 16×16, 3 planes, plane P at byte P*0x2000; per sprite 32 bytes/plane; the two 8-wide halves
+// are byte-swapped. Pixel (col,row) of sprite `code`, plane P:
+//   byte = code*32 + (col<8 ? 16 : 0) + row     ⇒ plane addr {code[7:0], (col<8), row[3:0]}  (13-bit)
+//   bit  = 7 - (col & 7)                          (MSB-first, same as the FG FLIP-FIX)
+//   pen3 = {p2_bit, p1_bit, p0_bit}               (transparent when pen3 == 0)
+//   spr_pen = {1'b0, color_center_bot[1], pen3}   (color bank = (color_center_bot>>1)&1, parallels FG's bit0)
+//
+// NOTE (build-verify tunables): if sprites land 1px/1line off, nudge SPR_X_ADJ / SPR_Y_ADJ; if colors are off,
+// the spr_pen palette mapping is the suspect (sprites can share or offset from the FG palette region).
+
+`timescale 1 ps / 1 ps
 
 module video_sprites (
     input  wire        clk_sys,
@@ -24,218 +36,152 @@ module video_sprites (
 
     input  wire [7:0]  color_center_bot,
 
-    // CPU-side write port (for sprite descriptor RAM, which is fgvideoram)
+    // CPU write mirrors — descriptors (fgvideoram) and graphics (charram, 3 planes)
     input  wire        cpu_we_spr,
     input  wire [9:0]  cpu_spr_addr,
     input  wire [7:0]  cpu_spr_dout,
+    input  wire        cpu_we_char_p0,
+    input  wire        cpu_we_char_p1,
+    input  wire        cpu_we_char_p2,
+    input  wire [12:0] cpu_char_addr,
+    input  wire [7:0]  cpu_char_dout,
 
-    // Render outputs
-    output reg  [4:0]  spr_pen,        // 5-bit palette index
-    output reg         spr_priority    // priority bit for LS148 mixer
+    output reg  [4:0]  spr_pen,
+    output reg         spr_priority
 );
 
-    // ========================================
-    // Sprite descriptor RAM (second read port on fgvideoram)
-    // BRAM duplication strategy:
-    //   - fgvideoram has one read port (used by video_fg for tile fetch).
-    //   - video_sprites needs a second read port for sprite descriptor lookup.
-    //   - Solution: duplicate the BRAM (sprite_desc_ram_inst) and mirror CPU writes
-    //     to both the tilemap BRAM and this sprite BRAM whenever cpu_we_spr is asserted.
-    //   - This adds 1K BRAM cost but avoids port-count limitations on M9K blocks.
-    //   - Both BRAMs are written identically; the tilemap reader and sprite reader
-    //     work independently without contention.
-    // ========================================
+    localparam [7:0] SPR_X_ADJ = 8'd0;   // tune after first build if needed
+    localparam [7:0] SPR_Y_ADJ = 8'd0;
 
-    wire [7:0] spr_desc_byte;  // Read output from sprite descriptor RAM
-    dpram #(.address_width(10), .data_width(8)) sprite_desc_ram_inst (
+    // ====================================================================
+    // Descriptor mirror (a copy of fgvideoram; CPU writes mirrored in)
+    // ====================================================================
+    reg  [9:0] dsc_addr;
+    wire [7:0] dsc_q;
+    dpram #(.address_width(10), .data_width(8)) desc_mirror (
         .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we_spr),
         .address_a(cpu_spr_addr), .data_a(cpu_spr_dout), .q_a(),
         .clock_b(clk_sys), .enable_b(1'b1), .wren_b(1'b0),
-        .address_b(spr_desc_read_addr), .data_b(8'b0), .q_b(spr_desc_byte)
+        .address_b(dsc_addr), .data_b(8'b0), .q_b(dsc_q)
     );
 
-    // ========================================
-    // Per-line sprite scanning and rendering
-    // ========================================
-    // On each scanline, iterate through all 8 sprite slots and check if any
-    // sprite overlaps the current pixel. If so, latch its color and priority.
-    // Sprites are 16×16, so we need to check:
-    //   - Is the sprite enabled (bit 0 of flags byte)?
-    //   - Does the sprite Y range [sy, sy+16) contain vcnt?
-    //   - Does the sprite X range [sx, sx+16) contain hcnt?
-    // If all conditions are met, fetch the sprite code, apply flipx/flipy,
-    // compute the pixel color, and output it.
+    // ====================================================================
+    // Per-frame descriptor scan → 8 latched slots. Cycles a 32-step counter
+    // (slot[2:0], byte[1:0]); one mirror read per ce_pix, 1-cycle BRAM delay.
+    // ====================================================================
+    reg        s_en  [0:7];
+    reg        s_fx  [0:7];
+    reg        s_fy  [0:7];
+    reg  [7:0] s_code[0:7];
+    reg  [7:0] s_sx  [0:7];   // 240 - X (8-bit; wrap handled by 8-bit position math below)
+    reg  [7:0] s_sy  [0:7];   // 240 - Y
 
-    // Sprite slot index (0..7)
-    reg [2:0]  spr_slot;
-    reg [3:0]  spr_sub_x;     // Sub-pixel X position within sprite (0..15)
-    reg [3:0]  spr_sub_y;     // Sub-pixel Y position within sprite (0..15)
-
-    // Current sprite descriptor latch
-    reg [7:0]  spr_flags;     // flags byte (bit 0 = enable, [2:1] = flipx/flipy)
-    reg [7:0]  spr_code;      // sprite code (character index)
-    reg [7:0]  spr_y_raw;     // raw Y position from RAM
-    reg [7:0]  spr_x_raw;     // raw X position from RAM
-    reg [8:0]  spr_y_pos;     // computed Y position (240 - spr_y_raw)
-    reg [8:0]  spr_x_pos;     // computed X position (240 - spr_x_raw)
-
-    // Sprite gfxram read address (for 16×16 sprite pixel lookup)
-    reg [10:0] spr_gfx_addr;  // {code[5:0], sub_y[3:0], sub_x[1:0]}
-    wire [7:0] spr_gfx_lo, spr_gfx_hi;
-
-    // Sprite gfxram (two planes, 2bpp per pixel)
-    dpram #(.address_width(11), .data_width(8)) spr_gfx_lo_inst (
-        .clock_a(clk_sys), .enable_a(1'b1), .wren_a(1'b0),
-        .address_a(10'b0), .data_a(8'b0), .q_a(),
-        .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
-        .address_b(spr_gfx_addr), .data_b(8'b0), .q_b(spr_gfx_lo)
-    );
-
-    dpram #(.address_width(11), .data_width(8)) spr_gfx_hi_inst (
-        .clock_a(clk_sys), .enable_a(1'b1), .wren_a(1'b0),
-        .address_a(10'b0), .data_a(8'b0), .q_a(),
-        .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
-        .address_b(spr_gfx_addr), .data_b(8'b0), .q_b(spr_gfx_hi)
-    );
-
-    // TODO(verify-with-mame): Sprite gfxram should be loaded from ROM or initialized.
-    // For now, leaving as TODO. MAME gfxdecode->gfx(1) decodes sprite graphics.
-
-    // ========================================
-    // Sprite descriptor fetch state machine
-    // ========================================
-    // Each sprite occupies 4 interleaved locations (stride = 0x20 = 32 bytes).
-    // Sprite 0: offs = 28*32 = 224 (0xE0)
-    // Sprite 1: offs = 224 - 128 = 96  (0x60)
-    // ...
-    // Sprite 7: offs = 224 - 896 = -672 (wraps in 1K: 0x200 + ... )
-
-    // Sprite slot offset calculation: for slot i (0..7), base offset = 28*0x20 - i*4*0x20
-    // This simplifies to: base_offset = 224 - 128*i (with wrap-around in 10 bits)
-    // Read the four descriptor bytes for the current sprite slot from sprite_desc_ram.
-
-    wire [9:0] spr_slot_base = 10'd224 - ({spr_slot, 4'd0} << 3) + ({spr_slot, 7'd0});
-    // Cleaner: spr_slot_base = 224 - 128*spr_slot = 224 - (spr_slot << 7)
-    wire [9:0] spr_slot_base_calc = 10'd224 - ({spr_slot, 7'b0});
-
-    wire [9:0] spr_desc_read_addr;  // Read address for sprite descriptor
-
-    // TODO(verify-with-mame): MAME iterates sprites backwards (i from 7 to 0).
-    // Line 530: for (int i = 0; i < 8; i++, offs -= 4 * interleave)
-    // This is a per-frame iteration in the blitter, not per-pixel. For RTL, we
-    // iterate per scanline to check overlaps. Confirm sprite rendering order.
-
-    // Per-pixel matching: For each visible pixel (hcnt, vcnt) in range [0..255, 8..247],
-    // iterate through all 8 sprite slots and check if (hcnt, vcnt) falls within any sprite.
-    // If a hit, fetch the sprite descriptor, compute the sub-pixel address, and look up
-    // the 2bpp pixel color. Output the highest-priority match (or black if no match).
-
-    // For simplicity, use a combinational per-line scan: on each scanline (ce_pix && hcnt < 256),
-    // loop through 8 slots and find the first matching sprite. This is a "sprite priority"
-    // scheme where lower slot numbers have higher priority (Sprite 0 > Sprite 1, etc.).
+    reg  [4:0] scan, scan_d;
+    wire [2:0] scan_spr  = scan[4:2];
+    wire [1:0] scan_byte = scan[1:0];
+    // addr = 0x380 - slot*0x80 + byte*0x20
+    wire [9:0] scan_addr = 10'h380 - {scan_spr, 7'b0} + {scan_byte, 5'b0};
 
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            // Each pixel cycle, check if current (hcnt, vcnt) hits any active sprite.
-            // Start iteration from slot 0 (will loop in FSM or combinational logic).
-            spr_slot <= 3'd0;
-            spr_sub_x <= hcnt[3:0];  // Sub-pixel X within sprite
-            spr_sub_y <= vcnt[3:0];  // Sub-pixel Y within sprite
+            // latch the byte requested last cycle (indexed by scan_d)
+            case (scan_d[1:0])
+                2'd0: begin
+                    s_en[scan_d[4:2]] <= dsc_q[0];
+                    s_fy[scan_d[4:2]] <= dsc_q[1];
+                    s_fx[scan_d[4:2]] <= dsc_q[2];
+                end
+                2'd1: s_code[scan_d[4:2]] <= dsc_q;
+                2'd2: s_sy[scan_d[4:2]]   <= 8'd240 - dsc_q + SPR_Y_ADJ;
+                2'd3: s_sx[scan_d[4:2]]   <= 8'd240 - dsc_q + SPR_X_ADJ;
+            endcase
+            // request the next byte
+            dsc_addr <= scan_addr;
+            scan_d   <= scan;
+            scan     <= scan + 1'b1;
         end
     end
 
-    // Combinational sprite descriptor fetch
-    // Given spr_slot, compute the read address and latch the bytes.
-    wire [9:0] spr_byte0_addr = spr_slot_base_calc + 10'd0;
-    wire [9:0] spr_byte1_addr = spr_slot_base_calc + 10'd32;
-    wire [9:0] spr_byte2_addr = spr_slot_base_calc + 10'd64;
-    wire [9:0] spr_byte3_addr = spr_slot_base_calc + 10'd96;
-
-    assign spr_desc_read_addr = spr_byte0_addr;  // Fetch byte 0 (flags)
-
-    // TODO(verify-with-mame): Need to implement a 4-cycle pipelined fetch to get all 4 bytes.
-    // For now, using a simplified state machine placeholder.
-
-    always @(posedge clk_sys) begin
-        if (ce_pix) begin
-            // Latch sprite descriptor bytes (MAME lines 534-538)
-            spr_flags <= spr_desc_byte;  // offs + 0
-            // spr_code, spr_y_raw, spr_x_raw fetched in subsequent cycles
+    // ====================================================================
+    // Per-pixel priority select: highest slot index covering (hcnt,vcnt) wins
+    // (matches MAME draw order). 8-bit position math → +256 wrap is automatic.
+    // ====================================================================
+    integer k;
+    reg        win_valid;
+    reg  [7:0] win_code;
+    reg        win_fx, win_fy;
+    reg  [3:0] win_col;       // 0..15 within sprite
+    reg  [3:0] win_row;
+    reg  [7:0] dx, dy;
+    always @(*) begin
+        win_valid = 1'b0; win_code = 8'd0; win_fx = 1'b0; win_fy = 1'b0;
+        win_col = 4'd0; win_row = 4'd0;
+        for (k = 0; k < 8; k = k + 1) begin
+            dx = hcnt[7:0] - s_sx[k];
+            dy = vcnt[7:0] - s_sy[k];
+            if (s_en[k] && (dx < 8'd16) && (dy < 8'd16)) begin
+                win_valid = 1'b1;
+                win_code  = s_code[k];
+                win_fx    = s_fx[k];
+                win_fy    = s_fy[k];
+                win_col   = dx[3:0];
+                win_row   = dy[3:0];
+            end
         end
     end
 
-    // ========================================
-    // Sprite position computation
-    // ========================================
-    // Per MAME:
-    //   sx = 240 - sprite_ram[offs + 3 * interleave]
-    //   sy = 240 - sprite_ram[offs + 2 * interleave]
-    // Note: This is relative to the 256×240 visible area.
+    // per-sprite flip
+    wire [3:0] gcol = win_fx ? (4'd15 - win_col) : win_col;
+    wire [3:0] grow = win_fy ? (4'd15 - win_row) : win_row;
 
-    always @(*) begin
-        spr_x_pos = 9'd240 - {1'b0, spr_x_raw};
-        spr_y_pos = 9'd240 - {1'b0, spr_y_raw};
-    end
+    // gfx plane address: {code, (col<8), row}  (col<8 ⇒ +16 half ⇒ ~gcol[3])
+    wire [12:0] gfx_addr = {win_code, ~gcol[3], grow};
 
-    // ========================================
-    // Sprite overlap detection and rendering
-    // ========================================
-    // Check if (hcnt, vcnt) falls within [sx, sx+16) × [sy, sy+16).
+    // ====================================================================
+    // Sprite graphics mirror (3 charram planes; CPU charram writes mirrored in)
+    // ====================================================================
+    wire [7:0] gp0, gp1, gp2;
+    dpram #(.address_width(13), .data_width(8)) sgfx_p0 (
+        .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we_char_p0),
+        .address_a(cpu_char_addr), .data_a(cpu_char_dout), .q_a(),
+        .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
+        .address_b(gfx_addr), .data_b(8'b0), .q_b(gp0)
+    );
+    dpram #(.address_width(13), .data_width(8)) sgfx_p1 (
+        .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we_char_p1),
+        .address_a(cpu_char_addr), .data_a(cpu_char_dout), .q_a(),
+        .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
+        .address_b(gfx_addr), .data_b(8'b0), .q_b(gp1)
+    );
+    dpram #(.address_width(13), .data_width(8)) sgfx_p2 (
+        .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we_char_p2),
+        .address_a(cpu_char_addr), .data_a(cpu_char_dout), .q_a(),
+        .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
+        .address_b(gfx_addr), .data_b(8'b0), .q_b(gp2)
+    );
 
-    wire spr_enabled = spr_flags[0];
-    wire spr_flipx = spr_flags[2];
-    wire spr_flipy = spr_flags[1];
-
-    wire spr_x_match = (hcnt >= spr_x_pos[8:0]) && (hcnt < (spr_x_pos[8:0] + 9'd16));
-    wire spr_y_match = (vcnt >= spr_y_pos[8:0]) && (vcnt < (spr_y_pos[8:0] + 9'd16));
-    wire spr_hit = spr_enabled && spr_x_match && spr_y_match;
-
-    // TODO(verify-with-mame): Sprite sub-pixel address calculation.
-    // MAME uses gfxdecode->gfx(1)->prio_transpen(...) which applies
-    // flipx/flipy transformations and draws the sprite. For RTL, we need to:
-    //   1. Compute the sub-pixel position within the 16×16 sprite.
-    //   2. Apply flipx/flipy to mirror the address if needed.
-    //   3. Look up the 2bpp pixel from spr_gfx_ram.
-    //   4. Apply the color bank to select palette index.
-
-    reg [3:0] spr_fx, spr_fy;  // Flipped coordinates
-    always @(*) begin
-        spr_fx = spr_flipx ? (4'd15 - spr_sub_x) : spr_sub_x;
-        spr_fy = spr_flipy ? (4'd15 - spr_sub_y) : spr_sub_y;
-    end
-
-    // Sprite gfxram address: {code[5:0], fy[3:0], fx[1:0]}
-    // (Assuming 8×8 tiles packed into the gfxram, 4 tiles per sprite row)
-    always @(*) begin
-        spr_gfx_addr = {spr_code[5:0], spr_fy, spr_fx[1:0]};
-    end
-
-    // Sprite color palette index (5 bits)
-    // pen = { spr_gfx_hi[spr_fx[2:0]], spr_gfx_lo[spr_fx[2:0]] }  (2 bits)
-    // color_bank = (color_center_bot >> 1) & 1  (1 bit)
-    // palette_idx = { color_bank, attr[1:0], pen[1:0] }  (5 bits)
-    // TODO(verify-with-mame): Sprite palette index calculation. MAME uses color as a parameter
-    // to gfxdecode->gfx(1)->prio_transpen(), which selects the palette bank.
-    // Assuming: palette_idx = { color_center_bot[1], 2'b00, pen[1:0] }
-
-    reg [1:0] spr_pen_2bpp;
-    always @(*) begin
-        // Extract 2bpp pixel from sprite graphics data
-        // spr_fx[2] selects which nibble (high or low) of the byte
-        spr_pen_2bpp = spr_fx[2] ? {spr_gfx_hi[7-spr_fx[1:0]], spr_gfx_lo[7-spr_fx[1:0]]} :
-                                   {spr_gfx_hi[3-spr_fx[1:0]], spr_gfx_lo[3-spr_fx[1:0]]};
-    end
-
-    wire [1:0] color_bank = {(color_center_bot >> 1) & 1'b1, 1'b0};  // Expands to 2 bits
+    // ====================================================================
+    // Output pipeline: register the bit-select + valid alongside the BRAM
+    // address (1-cycle read latency), then decode the pen the next cycle.
+    // ====================================================================
+    reg  [2:0] bit_r;
+    reg        valid_r;
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            if (spr_hit && (spr_pen_2bpp != 2'b00)) begin
-                // Non-transparent sprite pixel
-                spr_pen <= {color_bank[0], 2'b00, spr_pen_2bpp};
-                spr_priority <= 1'b1;  // Sprite has priority
+            bit_r   <= 3'd7 - gcol[2:0];   // MSB-first
+            valid_r <= win_valid;
+        end
+    end
+
+    wire [2:0] pen3 = { gp2[bit_r], gp1[bit_r], gp0[bit_r] };
+
+    always @(posedge clk_sys) begin
+        if (ce_pix) begin
+            if (valid_r && (pen3 != 3'b000)) begin
+                spr_pen      <= {1'b0, color_center_bot[1], pen3};
+                spr_priority <= 1'b1;
             end else begin
-                // No sprite hit or transparent pixel
-                spr_pen <= 5'b00000;
+                spr_pen      <= 5'b00000;
                 spr_priority <= 1'b0;
             end
         end

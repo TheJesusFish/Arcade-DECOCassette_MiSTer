@@ -79,14 +79,15 @@ module video_bg (
     //   row[4]==1    (rows 16..31): row_offset = 0x100
     //   tile_index = base + row_offset - row[3:0]*8
     // ========================================
-    wire [9:0] tile_base =
-        (tile_col[4:3] == 2'b00) ? (10'h078 + {7'b0, tile_col[2:0]}) :
-        (tile_col[4:3] == 2'b01) ? (10'h0ff - {7'b0, tile_col[2:0]}) :
-        (tile_col[4:3] == 2'b10) ? (10'h278 + {7'b0, tile_col[2:0]}) :
-                                   (10'h2ff - {7'b0, tile_col[2:0]});
-    wire [9:0] row_off       = tile_row[4] ? 10'h100 : 10'h000;
-    wire [9:0] row_subtract  = {3'b0, tile_row[3:0], 3'b0};   // row_in_quad * 8
-    wire [9:0] tile_index    = tile_base + row_off - row_subtract;
+    // TILE-OFFSET-FIX-2026-06-10: the prior LUT had col/row TRANSPOSED (added col, subtracted row*8) → every BG
+    // tile scrambled. MAME mapper is tile_offset[col*32+row] (decocass_v.cpp:130-163). Verified directly against
+    // the table: base = 0x078 - col*8; rows 0..7 ADD row; rows 8..15 MIRROR as (base + 0x08f - row).
+    //   col0row0=0x078 col0row1=0x079 col1row0=0x070 col15row0=0x000 col0row8=0x0ff col0row15=0x0f8 ✓
+    // (16-col × 16-row visible area, no scroll yet. Remaining BG TODOs: per-tile bitmap group order may still be
+    //  reversed; the get_bg_l/r split's `tile_index & 0x80` empty-tile masking is not implemented.)
+    wire [9:0] bg_base    = 10'h078 - {3'b0, tile_col[3:0], 3'b0};   // 0x078 - col*8  (col 0..15 → 0x078..0x000)
+    wire [9:0] tile_index = tile_row[3] ? (bg_base + 10'h08f - {6'b0, tile_row[3:0]})   // rows 8..15 (mirrored)
+                                        : (bg_base + {6'b0, tile_row[3:0]});            // rows 0..7
 
     // ========================================
     // BRAM #1: tile codes (also doubles as plane-0 bitmap source).
@@ -104,13 +105,18 @@ module video_bg (
     );
 
     // Latch tile_code and pixel coordinates 1 cycle (waiting for tilecode_byte)
+    // BG-FLIPY-FIX-2026-06-10: MAME draws the bit7-set cells via get_bg_r_tile_info with TILE_FLIPY
+    // (decocass_v.cpp:210-217). For our single static tilemap (no per-half scroll) that's just: flip Y on
+    // tile_index[7] cells. (The literal &0x80 EMPTY mask is only for the two-tilemap split + separate scroll,
+    // which we don't have — masking here would blank half the screen, so we flip instead.)
+    wire [3:0] eff_pix_y = tile_index[7] ? (4'd15 - pix_y) : pix_y;
     reg [3:0] s1_tile_code;
     reg [3:0] s1_pix_x, s1_pix_y;
     always @(posedge clk_sys) begin
         if (ce_pix) begin
             s1_tile_code <= tilecode_byte[7:4];
             s1_pix_x     <= pix_x;
-            s1_pix_y     <= pix_y;
+            s1_pix_y     <= eff_pix_y;
         end
     end
 
@@ -120,7 +126,8 @@ module video_bg (
     // We use a separate dpram so we can read tile codes and plane 0 simultaneously.
     // CPU writes are mirrored from the same $D000-$D3FF range.
     // ========================================
-    wire [9:0] plane0_addr = {s1_tile_code[3:0], 6'b0} + {6'b0, s1_pix_y[3:0]} + {4'b0, s1_pix_x[3:2], 4'b0};
+    // BG-BITMAP-FIX-2026-06-10: group order reversed per tilelayout xoffset = (3 - x[3:2])*16 (was x[3:2]*16).
+    wire [9:0] plane0_addr = {s1_tile_code[3:0], 6'b0} + {6'b0, s1_pix_y[3:0]} + {4'b0, (2'd3 - s1_pix_x[3:2]), 4'b0};
     wire [7:0] plane0_byte;
     dpram #(.address_width(10), .data_width(8)) bg_plane0_inst (
         .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we_tile_lo),
@@ -157,13 +164,13 @@ module video_bg (
     //   plane 0: byte[4 + pix_x[1:0]] — upper nibble of $D0xx byte
     //   plane 1: byte[0 + pix_x[1:0]] — lower nibble of $D4xx byte
     //   plane 2: byte[4 + pix_x[1:0]] — upper nibble of $D4xx byte
-    wire [3:0] p0_bit_idx = 4'd4 + {2'b0, s2_pix_x_lo};
-    wire [3:0] p1_bit_idx = 4'd0 + {2'b0, s2_pix_x_lo};
-    wire [3:0] p2_bit_idx = 4'd4 + {2'b0, s2_pix_x_lo};
-
-    wire p0 = plane0_byte[p0_bit_idx[2:0]];
-    wire p1 = plane12_byte[p1_bit_idx[2:0]];
-    wire p2 = plane12_byte[p2_bit_idx[2:0]];
+    // BG-BITMAP-FIX-2026-06-10: MSB-first (like the FG FLIP-FIX) + correct nibbles per tilelayout planeoffset
+    // {8196,8192,4} (decocass.cpp:961): pen LSB(p0) = $D000 LOWER nibble bit(3-x); p1 = $D400 UPPER nibble bit(7-x);
+    // pen MSB(p2) = $D400 LOWER nibble bit(3-x). (Was nibbles swapped + LSB-first.)
+    wire [2:0] bg_xlo = {1'b0, s2_pix_x_lo};        // 0..3
+    wire p0 = plane0_byte [3'd3 - bg_xlo];          // $D000 lower nibble, MSB-first
+    wire p1 = plane12_byte[3'd7 - bg_xlo];          // $D400 upper nibble, MSB-first
+    wire p2 = plane12_byte[3'd3 - bg_xlo];          // $D400 lower nibble, MSB-first
 
     wire [2:0] pen = {p2, p1, p0};
 
