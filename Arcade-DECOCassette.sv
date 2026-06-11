@@ -1742,9 +1742,15 @@ wire       diag_show = (diag_rowA | diag_rowB) && diag_in && !diag_gap;
 // wire [7:0] diag_r = core_r;
 // wire [7:0] diag_g = core_g;
 // wire [7:0] diag_b = core_b;
-wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
-wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
-wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
+// SWATCH-OFF-2026-06-10: overlay flipped to PASS-THROUGH for clean reference screenshots. All probe logic
+// (diag_pc_live, dark_flags, etc.) stays intact and latching — only the on-screen bands are hidden.
+// DIAG-REVERT-2026-06-10: restore overlay = re-enable the 3 diag_show lines, comment the 3 core_* lines.
+// wire [7:0] diag_r = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_r;
+// wire [7:0] diag_g = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_g;
+// wire [7:0] diag_b = diag_show ? (diag_lit ? 8'hFF : 8'h20) : core_b;
+wire [7:0] diag_r = core_r;
+wire [7:0] diag_g = core_g;
+wire [7:0] diag_b = core_b;
 // ===== end DIAG-REVERT-2026-06-03c =====
 
 // Palette lookup (task 11)
