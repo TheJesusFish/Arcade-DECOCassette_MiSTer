@@ -61,11 +61,18 @@ module video_palette (
     //   producing the same final RGB as MAME's `~data` formula.
     wire [7:0] cpu_dout_inv = ~cpu_dout;
 
+    // PALETTE-BG-COLORSET-2026-06-28: pens 32-63 use MAME's BITSWAPPED indirect half
+    // (decocass_palette: set_pen_indirect(32+i, bitswap<8>(i,7,6,5,4,3,1,2,0)) = swap pen bits 1↔2).
+    // pens 0-31 = direct. Read index into the 32-color palram:
+    wire [4:0] pal_rd_idx = pen[5] ? {pen[4], pen[3], pen[1], pen[2], pen[0]} : pen[4:0];
+
     dpram #(.address_width(8), .data_width(8)) palram_inst (
         .clock_a(clk_sys), .enable_a(1'b1), .wren_a(cpu_we),
         .address_a(cpu_addr), .data_a(cpu_dout_inv), .q_a(),
         .clock_b(clk_sys), .enable_b(ce_pix), .wren_b(1'b0),
-        .address_b(pen[4:0]),
+        // PALETTE-BG-COLORSET-2026-06-28: original direct read below, uncomment to restore (no upper-half bitswap)
+        // .address_b(pen[4:0]),
+        .address_b({3'b000, pal_rd_idx}),
         .data_b(8'b0), .q_b(palram_dout)
     );
 

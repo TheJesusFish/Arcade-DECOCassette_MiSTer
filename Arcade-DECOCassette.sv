@@ -1301,7 +1301,8 @@ wire [7:0] aud_flags = {al_aypulse, al_aywr, al_a000, al_irq, al_nmifired, al_nm
 // =========================================================================
 // VIDEO SUBSYSTEM (tasks 07-11)
 // =========================================================================
-wire [4:0]  fg_pen, bg_pen, spr_pen, mis_pen;
+wire [4:0]  fg_pen, spr_pen, mis_pen;
+wire [5:0]  bg_pen;   // PALETTE-BG-COLORSET-2026-06-28: 6-bit (BG color-set 5 reaches pens 40-47, the upper/bitswapped half)
 wire        fg_opaque, bg_opaque, spr_opaque, mis_opaque;
 
 // Video timing

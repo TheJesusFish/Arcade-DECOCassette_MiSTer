@@ -21,7 +21,7 @@ module deco_video_mixer (
 
     // Layer inputs (5-bit pens + opaque flags)
     input  wire [4:0]  fg_pen,   input  wire fg_opaque,
-    input  wire [4:0]  bg_pen,   input  wire bg_opaque,
+    input  wire [5:0]  bg_pen,   input  wire bg_opaque,   // PALETTE-BG-COLORSET-2026-06-28: bg_pen now 6-bit (upper-half color set)
     input  wire [4:0]  spr_pen,  input  wire spr_opaque,
     input  wire [4:0]  mis_pen,  input  wire mis_opaque,
 
@@ -95,7 +95,9 @@ module deco_video_mixer (
         // Step 2: Draw edge opaque if bkg_ena and edge_valid
         // From decocass_v.cpp:747-751
         if (bkg_ena && edge_valid) begin
-            pen_next = {1'b0, bg_pen};
+            // PALETTE-BG-COLORSET-2026-06-28: original below, uncomment to restore 5-bit bg_pen
+            // pen_next = {1'b0, bg_pen};
+            pen_next = bg_pen;          // bg_pen is now the full 6-bit pen (carries the upper-half color-set bit)
             b4_modulate_next = 1'b0;
         end
 
@@ -111,7 +113,9 @@ module deco_video_mixer (
             b4_modulate_next = 1'b0;
         end else if (!cross_on && bkg_ena && edge_valid) begin
             // Transparent edge mode (when NOT cross_on and bkg_ena)
-            pen_next = {1'b0, bg_pen};
+            // PALETTE-BG-COLORSET-2026-06-28: original below, uncomment to restore 5-bit bg_pen
+            // pen_next = {1'b0, bg_pen};
+            pen_next = bg_pen;          // 6-bit bg_pen (upper-half color set)
             b4_modulate_next = 1'b0;
         end
 

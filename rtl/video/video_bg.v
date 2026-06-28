@@ -63,7 +63,7 @@ module video_bg (
     input  wire [7:0]  cpu_dout,
 
     // Render outputs
-    output reg  [4:0]  bg_pen,
+    output reg  [5:0]  bg_pen,   // PALETTE-BG-COLORSET-2026-06-28: 6-bit pen (color-set 5 → pens 40-47, bitswapped half)
     output reg         bg_opaque
 );
 
@@ -147,6 +147,22 @@ module video_bg (
     wire [3:0] eff_pix_y  = half_bottom ? (4'd15 - pix_y) : pix_y;
     wire       blank_comb = tile_index[7] ^ half_bottom;
 
+    // BG-SKEWFIX-2026-06-28: the tile-code BRAM (bg_tilecodes) has 1-cycle read latency, so `tilecode_byte` reflects
+    // the tile from hcnt N-1 while pix_x/eff_pix_y/blank_comb are from hcnt N. Latching them together (original s1
+    // below) drew tile N-1's code with tile N's pixel offset → a 1px-wrong sliver at each tile's hcnt boundary = a
+    // line at each tile's TOP on the 90°-rotated display (the colored-line artifact, MAME-clean). Fix: delay the
+    // coordinate/mask path one cycle (stage A) so it aligns with tilecode_byte, THEN latch s1. (Sprites already do
+    // this via their delayed bit_r — that's why sprites are clean.) Net: uniform ~1px hcnt shift, clean boundaries.
+    reg [3:0] pixA_x, pixA_y;
+    reg       blankA;
+    always @(posedge clk_sys) begin
+        if (ce_pix) begin
+            pixA_x <= pix_x;
+            pixA_y <= eff_pix_y;
+            blankA <= blank_comb;
+        end
+    end
+
     // Latch tile_code, pixel coordinates and the empty-mask 1 cycle (waiting for tilecode_byte).
     reg [3:0] s1_tile_code;
     reg [3:0] s1_pix_x, s1_pix_y;
@@ -154,9 +170,13 @@ module video_bg (
     always @(posedge clk_sys) begin
         if (ce_pix) begin
             s1_tile_code <= tilecode_byte[7:4];
-            s1_pix_x     <= pix_x;
-            s1_pix_y     <= eff_pix_y;
-            s1_blank     <= blank_comb;
+            // BG-SKEWFIX-2026-06-28: original un-delayed pix/mask below, uncomment to restore the 1px boundary skew
+            // s1_pix_x  <= pix_x;
+            // s1_pix_y  <= eff_pix_y;
+            // s1_blank  <= blank_comb;
+            s1_pix_x     <= pixA_x;
+            s1_pix_y     <= pixA_y;
+            s1_blank     <= blankA;
         end
     end
 
@@ -224,7 +244,12 @@ module video_bg (
     // ========================================
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            bg_pen    <= {1'b0, color_center_bot[7], pen};
+            // PALETTE-BG-COLORSET-2026-06-28: emit the FULL 6-bit pen per MAME gfx(2) color = `color*4+1`.
+            //   color_attr = ccb[7] ? 5 : 1 ;  pen = color_attr*8 + pix_pen = {color_attr[2:0], pen}
+            //   ccb[7]=0 → pens 8-15 (lower/direct);  ccb[7]=1 → pens 40-47 (upper half, bitswapped in video_palette).
+            // Original simplified mapping below, uncomment to restore:
+            // bg_pen <= {1'b0, color_center_bot[7], pen};
+            bg_pen    <= {(color_center_bot[7] ? 3'b101 : 3'b001), pen};
             // BG-REBUILD-2026-06-28: original below, uncomment to restore (no empty-tile mask)
             // bg_opaque <= (pen != 3'b000);
             bg_opaque <= (pen != 3'b000) & ~s2_blank;   // empty cells transparent → fill shows → no white dash
