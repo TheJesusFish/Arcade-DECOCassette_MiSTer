@@ -50,7 +50,12 @@ module dongle_type4 (
     input  wire [7:0]  mcu_dbb_sts,
 
     output wire [14:0] prom_addr,
-    input  wire [7:0]  prom_q
+    input  wire [7:0]  prom_q,
+
+    // DONGLE-WE-CONSUMED-2026-06-27: high when this dongle consumes a CPU write (MAME type4_w RETURNs
+    // on every write while latch=1 — counter MSB/LSB load — and does NOT forward to the 8041). The wrapper
+    // uses this to suppress the 8041 write so the counter-load bytes don't hit it as a spurious DATA/CMND.
+    output wire        we_consumed
 );
 
     //------------------------------------------------------------------------
@@ -110,6 +115,10 @@ module dongle_type4 (
     // (decocass_m.cpp:887)
     //------------------------------------------------------------------------
     assign prom_addr = m_type4_ctrs;
+
+    // When latch is set, every $E5x0/$E5x1 write is a counter load → MAME returns, no 8041 forward.
+    // (The latch-SET write itself has latch still 0 this cycle, so it correctly forwards to the 8041.)
+    assign we_consumed = m_type4_latch;
 
     //------------------------------------------------------------------------
     // Output data mux: PROM vs. MCU passthrough

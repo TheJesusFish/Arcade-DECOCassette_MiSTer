@@ -807,6 +807,7 @@ wire        dongle_re, dongle_we;
 wire [7:0]  dongle_dout;
 wire [3:0]  dongle_din_low4;    // legacy 4-bit nibble (mcu_tape_iface still uses it)
 wire [7:0]  dongle_din_full;    // 2026-05-18 — full 8-bit dongle output (per MAME)
+wire        dongle_we_consumed; // DONGLE-WE-CONSUMED-2026-06-27: dongle_mux -> mcu_tape_iface (suppress 8041 fwd)
 wire        mcu_cs_n, mcu_rd_n, mcu_wr_n, mcu_a0;
 wire [7:0]  mcu_host_din;  // CPU dout, latched by iface, presented to i8041
 
@@ -845,7 +846,8 @@ mcu_tape_iface mcu_tape_iface_inst (
 	.dongle_re            (dongle_re),
 	.dongle_we            (dongle_we),
 	.dongle_dout          (dongle_dout),
-	.dongle_din_low4      (dongle_din_low4)
+	.dongle_din_low4      (dongle_din_low4),
+	.dongle_we_consumed   (dongle_we_consumed)
 );
 
 // E5xx dongle response is automatically composed in mcu_tape_iface
@@ -967,7 +969,8 @@ dongle_mux dongle_mux_inst (
 	// was faked as {6'b0,IBF=0,OBF=host_dout_oe}. Needed for the BIOS<->MCU tape handshake.
 	.mcu_dbb_sts       (mcu_host_sts),
 	.mcu_status_d2     (mcu_p2_out[2]),
-	.mcu_status_d0     (mcu_p2_out[0])
+	.mcu_status_d0     (mcu_p2_out[0]),
+	.we_consumed       (dongle_we_consumed)
 );
 
 // Tie legacy `dongle_din_low4` to the low nibble of the 8-bit output

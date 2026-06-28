@@ -89,7 +89,12 @@ module mcu_tape_iface (
     output wire        dongle_re,
     output wire        dongle_we,
     output wire [7:0]  dongle_dout,
-    input  wire [3:0]  dongle_din_low4
+    input  wire [3:0]  dongle_din_low4,
+
+    // DONGLE-WE-CONSUMED-2026-06-27: when the active dongle consumes a write (MAME *_w returns without
+    // forwarding to the 8041 — e.g. type4 counter MSB/LSB load while latched), suppress the 8041 write so
+    // the dongle's internal-register bytes don't hit the 8041 as spurious DATA/CMND and derail tape framing.
+    input  wire        dongle_we_consumed
 );
 
     //------------------------------------------------------------------------
@@ -295,7 +300,9 @@ module mcu_tape_iface (
     // MCU as a bogus command byte -> firmware reject at $0ED (cmd must be $25..$34) ->
     // motor never commanded -> CASSETTE ERROR 59. (dongle_re/we below stay UNGATED — the
     // dongle module does its own offset decode; cpu_din status mux is unchanged.)
-    wire e5_we_mcu = cpu_e5_we & ~cpu_addr_lo[1];
+    // DONGLE-WE-CONSUMED-2026-06-27: also drop writes the dongle consumes (MAME *_w early-return path),
+    // so type4 counter loads etc. never reach the 8041 as bogus command/data bytes.
+    wire e5_we_mcu = cpu_e5_we & ~cpu_addr_lo[1] & ~dongle_we_consumed;
     wire e5_re_mcu = cpu_e5_re & ~cpu_addr_lo[1];
 
     always @(posedge clk_sys or posedge reset) begin
