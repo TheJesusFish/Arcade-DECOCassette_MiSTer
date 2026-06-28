@@ -368,8 +368,18 @@ module mcu_tape_iface (
     // and return the combined result.
 
     assign dongle_addr_lo = cpu_addr_lo;
-    assign dongle_re      = cpu_e5_re;
-    assign dongle_we      = cpu_e5_we;
+    // DONGLE-E5XXMASK-GATE-2026-06-27: MAME routes ONLY $E5x0/$E5x1 (offset & E5XX_MASK[0x02])==0 to the dongle
+    // (decocass_e5xx_r:1200/1227, decocass_e5xx_w); $E5x2/$E5x3 are STATUS and NEVER reach m_dongle_r/_w. Our
+    // dongle modules decode A0 but NOT bit1, so the BIOS load loop's constant $E502 status polls (bios.log
+    // F512/F526/F205) were hitting the dongle as if they were $E500 and CLOBBERING its sequence-stateful latch
+    // every poll: type3 d0_latch (dongle_type3.v:119) and type1 latch1 (dongle_type1.v:180), plus spurious
+    // type3 counter ++ on $E503. Result = corrupted decoded bytes -> CRC fail -> CASSETTE ERROR #1 on BOTH
+    // dongled games (nodong has no state -> immune). Gate the strobes to $E5x0/1 to match MAME's E5XX_MASK.
+    // DIAG-REVERT-2026-06-27: original ungated strobes below, uncomment + delete the gated pair to restore.
+    // assign dongle_re      = cpu_e5_re;
+    // assign dongle_we      = cpu_e5_we;
+    assign dongle_re      = cpu_e5_re & ~cpu_addr_lo[1];   // $E5x0/1 only (E5XX_MASK)
+    assign dongle_we      = cpu_e5_we & ~cpu_addr_lo[1];   // $E5x0/1 only (E5XX_MASK)
     assign dongle_dout    = cpu_dout;
 
     // Return result to main CPU — MAME splits behavior on (offset & E5XX_MASK)

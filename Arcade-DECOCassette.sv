@@ -1001,9 +1001,18 @@ assign dongle_din_low4 = dongle_din_full[3:0];
 // assign e5xx_to_cpu = (dongle_type == 4'd7) ? dongle_din_full
 //                    : cpu_addr[1] ? e5xx_dongle
 //                    : (mcu_host_sts[0] ? dongle_din_full : 8'h00);
+// DONGLE-DATA-UNGATE-2026-06-27: MAME decocass_e5xx_r (decocass_m.cpp:1227-1232) returns m_dongle_r(offset)
+// for $E5x0/1 on ALL dongle types — NO OBF / 8041-status gate. The OBF gate below forced $E5x0/1 to 0x00
+// whenever OBF=0, which holds throughout type3 PROM-mode reads (data = m_donglerom[ctr], decocass_m.cpp:630,
+// independent of the 8041) → BurgerTime's decrypt stream read back as 0x00 = garbage. Ungated now, matching
+// the darksoft path and MAME. RISK: the $0582 idle check wants $E500==0 at idle; if it reboot-loops, the next
+// bug is the 8041 idle DBBOUT value (oracle = Useful Information/cbtime-e500.hex / clocknch-e500.hex), NOT this gate.
+// DIAG-REVERT-2026-06-27: original OBF-gated assign commented below — restore by uncommenting it + deleting the new one.
+// assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+//                    : (dongle_type == 4'd7) ? dongle_din_full             // $E5x0/1 = Darksoft dongle (raw)
+//                    : (mcu_host_sts[0] ? dongle_din_full : 8'h00);        // $E5x0/1 = legacy OBF-gated 8041 data
 assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
-                   : (dongle_type == 4'd7) ? dongle_din_full             // $E5x0/1 = Darksoft dongle (raw)
-                   : (mcu_host_sts[0] ? dongle_din_full : 8'h00);        // $E5x0/1 = legacy OBF-gated 8041 data
+                   : dongle_din_full;                                    // $E5x0/1 = dongle data, ALL types UNGATED (MAME m_dongle_r)
 
 // UNIFIED dongle storage: ALL dongle types read from DDR3 (below). The legacy 4 KB BRAM is gone.
 assign dprom_q = dprom_q_ddr;
