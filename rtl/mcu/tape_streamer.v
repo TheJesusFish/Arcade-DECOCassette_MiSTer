@@ -190,8 +190,18 @@ module tape_streamer (
     // assign dataclock = data_region_clocks % CLOCKS_PER_BLOCK;
     // assign block_num = (data_region_clocks / CLOCKS_PER_BLOCK) & 8'hFF;
     assign dataclock   = (clockpos >= block_base) ? (clockpos - block_base) : 32'h0;
-    assign byte_offset = dataclock / CLOCKS_PER_BYTE;          // ÷16 = shift (power of two, cheap)
-    assign bit_offset  = (dataclock / CLOCKS_PER_BIT) & 3'h7;  // ÷2  = shift (cheap)
+    // RDATA-PHASE-ADVANCE-2026-06-27 (Build-1 fix for cscrtry/type4 "tape error #1", count stuck at 999):
+    // The MCU samples RDATA IMMEDIATELY after the RCLK rising edge (mcu.dasm: $1A7 syncs to RCLK rising, then $0B4
+    // does `in a,p2 / jb7` = read RDATA). RCLK (clk_bit) rises on EVEN data_region_clocks; decoding byte/bit straight
+    // from `dataclock` made the data byte+bit flip ON that same edge → ZERO setup → marginal misread on specific
+    // byte patterns (cscrtry's count bits land on the bad edge; cmissnx's survive → looks game-specific but isn't).
+    // FIX: ADVANCE the byte/bit decode by ONE tape-clock so the data is SETTLED one clockpos before the sampled
+    // rising edge. The MCU reads the SAME bit sequence (0..7), now with a full tape-clock of setup — helps ALL games.
+    // RCLK itself (clk_bit, from data_region_clocks) is UNCHANGED. The 2026-06-04 attempt DELAYED RDATA (→ read the
+    // PREVIOUS bit, wrong direction); this ADVANCES it. REVERT: set `dataclock_out = dataclock`.
+    wire [31:0] dataclock_out = dataclock + 32'd1;
+    assign byte_offset = dataclock_out / CLOCKS_PER_BYTE;          // ÷16 = shift (power of two, cheap)
+    assign bit_offset  = (dataclock_out / CLOCKS_PER_BIT) & 3'h7;  // ÷2  = shift (cheap)
 
     // =====================================================================
     // Region detection (mirrors MAME lines 232-275)

@@ -4,6 +4,23 @@
 // (tile_code_byte and bitmap_byte hardcoded to 0). This version wires
 // CPU writes through to internal BRAMs and produces real pixel output.
 //
+// 2026-06-28 — BG-REBUILD: dual-tilemap (L=top half / R=bottom half) + per-half
+// scroll (back_h/vl/vr_shift) + empty-tile mask. This is the MAME-faithful
+// structure (decocass_v.cpp draw_edge:625, get_bg_l/r:199-219, video_start:700-704,
+// tile_offset[32*32]:130-163). Fixes: (a) the white dashes in empty BG cells
+// (empty-tile mask was missing), (b) choppy scrolling on Boulder Dash et al
+// (hardware fine-scroll registers were unused → only coarse CPU tile placement).
+// Every line it replaces is preserved directly below as a `// BG-REBUILD-2026-06-28:`
+// comment. Revert = restore those originals, delete the BG-REBUILD code.
+//   *** REGRESSION RISK: scrollx = 256 - back_h_shift may map the visible columns
+//       to a different LUT quadrant than the old no-scroll path. If BurgerTime/LnC
+//       shift by ~256px on the first build, that pins the hcnt/vcnt-vs-MAME origin
+//       delta (read it via MAME's screen_update popmessage: key 'I' → mode/h/vl/vr)
+//       and we add a constant origin offset. First build is a DIAGNOSTIC for this.
+//   *** ROTATION: the L/R split is on NATIVE screen-Y (vcnt). On rotated/vertical
+//       games (e.g. Flying Ball) it appears as a left/right seam — that's correct,
+//       rotation is handled downstream. Do NOT re-axis the split.
+//
 // MAME reference (decocass.cpp:961-970 tilelayout, decocass_v.cpp:130-163
 // tile_offset, decocass_v.cpp:199-228 get_bg_*_tile_info):
 //   - 32×32 tilemap of 16×16-pixel tiles
@@ -13,15 +30,6 @@
 //     (in the upper nibble — bit positions 4..7), $D400-$D7FF holds
 //     planes 1 and 2 interleaved (lower nibble = plane 1, upper = plane 2)
 //   - get_bg_l/r_tile_info returns m_bgvideoram[tile_index] >> 4
-//
-// SIMPLIFICATIONS in this implementation:
-//   - tile_offset LUT skipped — using direct {col, row} mapping. The
-//     real MAME LUT (decocass_v.cpp:130-163) remaps the 32×32 grid to
-//     non-linear memory layout. With direct mapping, the tilemap will
-//     be SCRAMBLED but pixels will still flow. Good enough as a first
-//     step to confirm BG is wired correctly; LUT can be added later.
-//   - Single tilemap (no split between left/right halves with separate
-//     scroll registers). Both halves render the same tilemap.
 //
 // Pixel-byte mapping (per MAME tilelayout):
 //   tile N, row y, pixel x (16 pixels per row):
@@ -40,7 +48,7 @@ module video_bg (
     input  wire [8:0]  hcnt,
     input  wire [8:0]  vcnt,
 
-    // Scroll/mode registers (currently unused — scroll deferred)
+    // Scroll/mode registers (BG-REBUILD-2026-06-28: now USED — were deferred)
     input  wire [7:0]  back_h_shift,
     input  wire [7:0]  back_vl_shift,
     input  wire [7:0]  back_vr_shift,
@@ -60,34 +68,57 @@ module video_bg (
 );
 
     // ========================================
-    // Internal timing / coordinate derivation
-    // No scroll applied yet — TODO: add scroll later
+    // BG-REBUILD-2026-06-28: scroll-aware coordinate derivation.
+    // Original no-scroll derivation preserved below (commented).
     // ========================================
-    wire [4:0] tile_col = {1'b0, hcnt[7:4]};   // 0..15 visible (tilemap is 32 wide)
-    wire [4:0] tile_row = {1'b0, vcnt[7:4]};
-    wire [3:0] pix_x    = hcnt[3:0];           // 0..15 pixel within tile
-    wire [3:0] pix_y    = vcnt[3:0];
+    // BG-REBUILD-2026-06-28: original below, uncomment to restore (no-scroll, visible 16x16 only)
+    // wire [4:0] tile_col = {1'b0, hcnt[7:4]};   // 0..15 visible (tilemap is 32 wide)
+    // wire [4:0] tile_row = {1'b0, vcnt[7:4]};
+    // wire [3:0] pix_x    = hcnt[3:0];           // 0..15 pixel within tile
+    // wire [3:0] pix_y    = vcnt[3:0];
+
+    // ---- per-half vertical scroll (draw_edge:630-637) ----
+    //   scrolly_l = back_vl_shift          (+256 if  mode_set&0x04)
+    //   scrolly_r = 256 - back_vr_shift    (+256 if !(mode_set&0x04))
+    //   half is selected by SCREEN-Y: L = top (vcnt<128), R = bottom (vcnt>=128) — video_start:700-704
+    wire        bank        = mode_set[2];                       // mode_set & 0x04 bank select
+    wire [9:0]  scrolly_l   = {2'b0, back_vl_shift} + (bank ? 10'd256 : 10'd0);
+    wire [9:0]  scrolly_r   = (10'd256 - {2'b0, back_vr_shift}) + (bank ? 10'd0 : 10'd256);
+    wire        half_bottom = (vcnt >= 9'd128);                  // R tilemap (bottom screen half)
+    wire [9:0]  scrolly     = half_bottom ? scrolly_r : scrolly_l;
+    wire [9:0]  srcline     = ({1'b0, vcnt} + scrolly) & 10'h1ff;   // (y + scrolly) & 0x1ff (draw_edge:663)
+
+    // ---- horizontal scroll + x-mode (draw_edge:639,673-679) ----
+    wire [9:0]  scrollx = 10'd256 - {2'b0, back_h_shift};        // 256 - back_h_shift
+    wire [9:0]  xsum    = {1'b0, hcnt} + scrollx;                // hcnt + scrollx
+    wire [9:0]  srccol  =
+        (mode_set[1:0] == 2'b00) ? {2'b0, xsum[7:0]}             : // (x+sx)&0xff        — hwy normal
+        (mode_set[1:0] == 2'b01) ? ((xsum + 10'h100) & 10'h1ff)  : // (x+sx+0x100)&0x1ff — manhattan top
+        (mode_set[1:0] == 2'b10) ? ({2'b0, xsum[7:0]} + 10'h100) : // ((x+sx)&0xff)+0x100— manhattan normal
+                                   (xsum & 10'h1ff);                // (x+sx)&0x1ff       — hwy/burnrub
+
+    // ---- tile cell + within-tile pixel from the scrolled coords ----
+    wire [4:0]  tile_col = srccol[8:4];     // 0..31
+    wire [4:0]  tile_row = srcline[8:4];    // 0..31
+    wire [3:0]  pix_x    = srccol[3:0];
+    wire [3:0]  pix_y    = srcline[3:0];
 
     // ========================================
-    // tile_offset LUT — derived from decocass_v.cpp:130-163.
-    // Table is structured as 4 column-quadrants × 2 row-halves:
-    //   col[4:3]==00 (cols 0..7):   base = 0x078 + col[2:0]    (increment by 1)
-    //   col[4:3]==01 (cols 8..15):  base = 0x0ff - col[2:0]    (decrement by 1)
-    //   col[4:3]==10 (cols 16..23): base = 0x278 + col[2:0]
-    //   col[4:3]==11 (cols 24..31): base = 0x2ff - col[2:0]
-    //   row[4]==0    (rows 0..15):  row_offset = 0
-    //   row[4]==1    (rows 16..31): row_offset = 0x100
-    //   tile_index = base + row_offset - row[3:0]*8
+    // tile_offset LUT — full 32×32 (decocass_v.cpp:130-163).
+    // BG-REBUILD-2026-06-28: extended from cols0-15/rows0-15 to the FULL 32×32 (scroll can push col/row past 15).
+    //   col_base = (col[4]?0x100:0) + (0x078 - col[3:0]*8)       col[4] adds +0x100
+    //   row_off  = (row[4]?0x200:0) + (row[3] ? 0x08f-row[3:0] : row[3:0])   row[4] adds +0x200
+    //   tile_index = col_base + row_off    (0..0x3ff)
+    // Spot-checks vs table: col0row0=0x078 col0row16=0x278 col16row0=0x178 col0row8=0x0ff col0row15=0x0f8 col0row24=0x2ff
     // ========================================
-    // TILE-OFFSET-FIX-2026-06-10: the prior LUT had col/row TRANSPOSED (added col, subtracted row*8) → every BG
-    // tile scrambled. MAME mapper is tile_offset[col*32+row] (decocass_v.cpp:130-163). Verified directly against
-    // the table: base = 0x078 - col*8; rows 0..7 ADD row; rows 8..15 MIRROR as (base + 0x08f - row).
-    //   col0row0=0x078 col0row1=0x079 col1row0=0x070 col15row0=0x000 col0row8=0x0ff col0row15=0x0f8 ✓
-    // (16-col × 16-row visible area, no scroll yet. Remaining BG TODOs: per-tile bitmap group order may still be
-    //  reversed; the get_bg_l/r split's `tile_index & 0x80` empty-tile masking is not implemented.)
-    wire [9:0] bg_base    = 10'h078 - {3'b0, tile_col[3:0], 3'b0};   // 0x078 - col*8  (col 0..15 → 0x078..0x000)
-    wire [9:0] tile_index = tile_row[3] ? (bg_base + 10'h08f - {6'b0, tile_row[3:0]})   // rows 8..15 (mirrored)
-                                        : (bg_base + {6'b0, tile_row[3:0]});            // rows 0..7
+    // BG-REBUILD-2026-06-28: original half-LUT (cols0-15/rows0-15 only) below, uncomment to restore
+    // wire [9:0] bg_base    = 10'h078 - {3'b0, tile_col[3:0], 3'b0};   // 0x078 - col*8
+    // wire [9:0] tile_index = tile_row[3] ? (bg_base + 10'h08f - {6'b0, tile_row[3:0]})   // rows 8..15 (mirrored)
+    //                                     : (bg_base + {6'b0, tile_row[3:0]});            // rows 0..7
+    wire [9:0] col_base = (tile_col[4] ? 10'h100 : 10'h000) + (10'h078 - {3'b0, tile_col[3:0], 3'b0});
+    wire [9:0] row_off  = (tile_row[4] ? 10'h200 : 10'h000)
+                        + (tile_row[3] ? (10'h08f - {6'b0, tile_row[3:0]}) : {6'b0, tile_row[3:0]});
+    wire [9:0] tile_index = col_base + row_off;
 
     // ========================================
     // BRAM #1: tile codes (also doubles as plane-0 bitmap source).
@@ -104,19 +135,28 @@ module video_bg (
         .address_b(tile_index), .data_b(8'b0), .q_b(tilecode_byte)
     );
 
-    // Latch tile_code and pixel coordinates 1 cycle (waiting for tilecode_byte)
-    // BG-FLIPY-FIX-2026-06-10: MAME draws the bit7-set cells via get_bg_r_tile_info with TILE_FLIPY
-    // (decocass_v.cpp:210-217). For our single static tilemap (no per-half scroll) that's just: flip Y on
-    // tile_index[7] cells. (The literal &0x80 EMPTY mask is only for the two-tilemap split + separate scroll,
-    // which we don't have — masking here would blank half the screen, so we flip instead.)
-    wire [3:0] eff_pix_y = tile_index[7] ? (4'd15 - pix_y) : pix_y;
+    // ========================================
+    // Per-half flip + empty-tile mask (get_bg_l/r_tile_info:199-219).
+    //   L (top)    : flags=0 (no flip);  empty when  (tile_index & 0x80)
+    //   R (bottom) : TILE_FLIPY;         empty when !(tile_index & 0x80)
+    //   ⇒ flip = half_bottom ;  blank = tile_index[7] ^ half_bottom
+    // Empty (blank) cells render TRANSPARENT (kills the white dashes that were the empty-placeholder glyph).
+    // ========================================
+    // BG-REBUILD-2026-06-28: original single-tilemap flip-on-bit7 hack below, uncomment to restore
+    // wire [3:0] eff_pix_y = tile_index[7] ? (4'd15 - pix_y) : pix_y;
+    wire [3:0] eff_pix_y  = half_bottom ? (4'd15 - pix_y) : pix_y;
+    wire       blank_comb = tile_index[7] ^ half_bottom;
+
+    // Latch tile_code, pixel coordinates and the empty-mask 1 cycle (waiting for tilecode_byte).
     reg [3:0] s1_tile_code;
     reg [3:0] s1_pix_x, s1_pix_y;
+    reg       s1_blank;     // BG-REBUILD-2026-06-28: pipelined empty-tile mask (aligns with s1_tile_code)
     always @(posedge clk_sys) begin
         if (ce_pix) begin
             s1_tile_code <= tilecode_byte[7:4];
             s1_pix_x     <= pix_x;
             s1_pix_y     <= eff_pix_y;
+            s1_blank     <= blank_comb;
         end
     end
 
@@ -154,9 +194,11 @@ module video_bg (
     // Latch second stage (pix_x[1:0] needs to align with byte data)
     // ========================================
     reg [1:0] s2_pix_x_lo;
+    reg       s2_blank;     // BG-REBUILD-2026-06-28: empty-tile mask, 2nd pipeline stage (aligns with bg_pen)
     always @(posedge clk_sys) begin
         if (ce_pix) begin
             s2_pix_x_lo <= s1_pix_x[1:0];
+            s2_blank    <= s1_blank;
         end
     end
 
@@ -178,15 +220,14 @@ module video_bg (
     // Output: palette index per MAME get_bg_l_tile_info (decocass_v.cpp:199-208):
     //   color = (m_color_center_bot >> 7) & 1  (1 bit)
     //   tileinfo.set(2, tile_code, color * 4 + 1, 0)
-    // gfx 2 has 8 color sets × 8 pens (3bpp). Effective palette index:
-    //   {color*4+1, pen[2:0]}  — 6 bits, but bg_pen is 5 bits.
-    //   For our purposes: {color, pen[2:0]} gives 16 entries (palette[0..15]).
-    // Use {1'b0, color, pen[2:0]} (5-bit). Transparent on pen=0.
+    // Use {1'b0, color, pen[2:0]} (5-bit). Transparent on pen=0 OR empty-tile (s2_blank).
     // ========================================
     always @(posedge clk_sys) begin
         if (ce_pix) begin
             bg_pen    <= {1'b0, color_center_bot[7], pen};
-            bg_opaque <= (pen != 3'b000);
+            // BG-REBUILD-2026-06-28: original below, uncomment to restore (no empty-tile mask)
+            // bg_opaque <= (pen != 3'b000);
+            bg_opaque <= (pen != 3'b000) & ~s2_blank;   // empty cells transparent → fill shows → no white dash
         end
     end
 
