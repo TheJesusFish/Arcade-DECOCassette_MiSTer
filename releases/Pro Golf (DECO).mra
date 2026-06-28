@@ -44,9 +44,8 @@
         <part name="v3.3j"  crc="51eef657"/>
         <part repeat="0xA0">00</part>
 
-        <!-- $01D00-$02CFF: Dongle PROM region (4 KB; 32 B PROM + 4064 B zero pad) -->
-        <part name="dp-1130_b.dgl" crc="e09ae5de"/>
-        <part repeat="0xFE0">00</part>
+        <!-- $01D00-$02CFF: legacy dongle PROM region (UNUSED — dongle moved to ioctl index 1 -> SDRAM/DDR3; zero-filled) -->
+        <part repeat="0x1000">00</part>
 
         <!-- $02D00-$02DFF: Spare -->
         <part repeat="0x100">00</part>
@@ -60,6 +59,12 @@
 
         <!-- $03000-: Cassette image -->
         <part name="dt-1130_9b.cas" crc="02123cd1"/>
+    </rom>
+
+    <!-- DONGLE-NEW-SPACE-2026-06-27: Type-1 dongle PROM on its OWN ioctl index = 1 (the wrapper reads ALL dongle
+         types from SDRAM/DDR3 via dongle_ld = ioctl_index==1; the legacy $01D00 index-0 path is dead). 32 B PROM. -->
+    <rom index="1" zip="decocass.zip|cprogolf.zip" md5="none">
+        <part name="dp-1130_b.dgl" crc="e09ae5de"/>
     </rom>
 
     <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
