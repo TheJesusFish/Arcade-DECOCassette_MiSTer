@@ -178,9 +178,18 @@ module video_fg (
     //   {color_center_bot[0], pen[2:0]}   (4-bit; padded to 5-bit fg_pen)
     // Transparent pen 0 per set_transparent_pen(0) at video_start.
     // ========================================
+    // FG-VSHIFT-2026-06-28: the FG sits ~2px LOW vs the BG (the BG pipeline is ~2 stages deeper). Under the 90°
+    // rotation display-vertical = hcnt and high-hcnt = TOP (HW-confirmed via the hblank=263 test), and the mixer
+    // samples per-hcnt — so DELAYING the FG output by N ce_pix moves it UP N display rows. Two extra stages → up 2.
+    // Tunable: add/remove a stage to nudge ±1 row. (Can only move UP via delay; if it ever needs DOWN, delay BG.)
+    // DIAG-REVERT-2026-06-28: original single-stage output below, uncomment + drop the 2 extra stages to restore.
+    // always @(posedge clk_sys) if (ce_pix) fg_pen <= { 1'b0, color_center_bot[0], pen };
+    reg [4:0] fg_pen_s0, fg_pen_s1;
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            fg_pen <= { 1'b0, color_center_bot[0], pen };
+            fg_pen_s0 <= { 1'b0, color_center_bot[0], pen };   // stage 0 = original timing
+            fg_pen_s1 <= fg_pen_s0;                            // +1 row up
+            fg_pen    <= fg_pen_s1;                            // +2 rows up  (FG-VSHIFT = 2)
         end
     end
 

@@ -89,6 +89,8 @@ module video_bg (
     wire [9:0]  srcline     = ({1'b0, vcnt} + scrolly) & 10'h1ff;   // (y + scrolly) & 0x1ff (draw_edge:663)
 
     // ---- horizontal scroll + x-mode (draw_edge:639,673-679) ----
+    // (BG-HSHIFT-2026-06-28 REVERTED 2026-06-28: hcnt origin shift did NOT move the top/bottom band on HW → not the
+    //  bg hcnt origin. Reverted to the plain xsum. The 8px band is a vcnt/active-window issue — see video_timing.)
     wire [9:0]  scrollx = 10'd256 - {2'b0, back_h_shift};        // 256 - back_h_shift
     wire [9:0]  xsum    = {1'b0, hcnt} + scrollx;                // hcnt + scrollx
     wire [9:0]  srccol  =

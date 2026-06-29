@@ -130,6 +130,7 @@ module decocass (
 
     // Latched control register outputs (for future phases)
     output wire [7:0]  mode_set_reg,      // $E402
+    output wire [7:0]  color_missiles_reg, // $E302 (missile color latch, data & 0x77)
     output wire [7:0]  back_h_shift_reg,  // $E403
     output wire [7:0]  back_vl_shift_reg, // $E404
     output wire [7:0]  back_vr_shift_reg, // $E405
@@ -377,6 +378,7 @@ module decocass (
     reg [7:0] center_v_shift;
     reg [7:0] coin_counter;
     reg [7:0] nmi_reset;
+    reg [7:0] color_missiles;   // MISSILES-IMPL-2026-06-28: $E302 latch
 
     always @(posedge clk_sys) begin
         if (reset) begin
@@ -391,8 +393,10 @@ module decocass (
             center_v_shift       <= 8'h00;
             coin_counter         <= 8'h00;
             nmi_reset            <= 8'h00;
+            color_missiles       <= 8'h00;
         end else if (ce_main && !cpu_rw_n_int) begin
             // Latch register writes at each CPU write cycle
+            if (cpu_addr_int == 16'hE302) color_missiles       <= cpu_dout_int & 8'h77;  // MAME: m_color_missiles = data & 0x77
             if (cpu_addr_int == 16'hE402) mode_set             <= cpu_dout_int;
             if (cpu_addr_int == 16'hE403) back_h_shift         <= cpu_dout_int;
             if (cpu_addr_int == 16'hE404) back_vl_shift        <= cpu_dout_int;
@@ -414,6 +418,7 @@ module decocass (
     assign part_h_shift_reg        = part_h_shift;
     assign part_v_shift_reg        = part_v_shift;
     assign color_center_bot_reg    = color_center_bot;
+    assign color_missiles_reg      = color_missiles;
     assign center_h_shift_space_reg = center_h_shift_space;
     assign center_v_shift_reg      = center_v_shift;
     assign coin_counter_reg        = coin_counter;

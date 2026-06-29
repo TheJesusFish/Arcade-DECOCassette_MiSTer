@@ -260,23 +260,32 @@ pll_sound pll_8041
 wire clk_vid = clk_sys;
 
 // DECO Cassette clock-enable chain (task 04)
-wire ce_hclk;     //  6.000 MHz   (pixel CE, 8041 CE)
-wire ce_hclk1;    //  3.000 MHz
-wire ce_hclk2;    //  1.500 MHz   (AY-3-8910 x2)
-wire ce_hclk4;    //    750 kHz   (DECO-222 main CPU)
-wire ce_audio;    //    500 kHz   (audio M6502)
-wire ce_tape;     //    4.8 kHz   (cassette streamer)
-wire ce_pix;      //  alias of ce_hclk
+// PAUSE-2026-06-28: pause_cpu (from pause_inst, below) gates EVERY functional clock-enable so the main 6502, the
+// audio 6502 + AYs, the 8041 MCU, and the cassette/tape loader all freeze TOGETHER — nothing drifts out of sync.
+// ce_pix is the ONLY ungated clock so video keeps scanning the frozen frame (the pause module also dims it).
+// pause_cpu is forced low only on a REAL reset (pause_reset — NOT ioctl_download, so you CAN pause during the cassette
+// load); the SD->SDRAM write path isn't gated by pause anyway, so a pause can never stall the transfer.
+// REVERT = drop the `& ~pause_cpu` (and the _raw rename).
+wire pause_cpu;   // driven by pause_inst far below; declared here so the gates can use it
+wire ce_hclk_raw, ce_hclk1_raw, ce_hclk2_raw, ce_hclk4_raw, ce_audio_raw, ce_tape_raw;
+
+wire ce_hclk  = ce_hclk_raw  & ~pause_cpu;   //  6.000 MHz   (8041 MCU CE)
+wire ce_hclk1 = ce_hclk1_raw & ~pause_cpu;   //  3.000 MHz
+wire ce_hclk2 = ce_hclk2_raw & ~pause_cpu;   //  1.500 MHz   (AY-3-8910 x2)
+wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu;   //    750 kHz   (DECO-222 main CPU)
+wire ce_audio = ce_audio_raw & ~pause_cpu;   //    500 kHz   (audio M6502)
+wire ce_tape  = ce_tape_raw  & ~pause_cpu;   //    4.8 kHz   (cassette streamer / loader)
+wire ce_pix;                                  //  alias of ce_hclk — NOT gated (video must keep running)
 
 clock_div clock_div_inst (
     .clk_sys  (clk_sys),
     .reset    (~pll_locked),
-    .ce_hclk  (ce_hclk),
-    .ce_hclk1 (ce_hclk1),
-    .ce_hclk2 (ce_hclk2),
-    .ce_hclk4 (ce_hclk4),
-    .ce_audio (ce_audio),
-    .ce_tape  (ce_tape),
+    .ce_hclk  (ce_hclk_raw),
+    .ce_hclk1 (ce_hclk1_raw),
+    .ce_hclk2 (ce_hclk2_raw),
+    .ce_hclk4 (ce_hclk4_raw),
+    .ce_audio (ce_audio_raw),
+    .ce_tape  (ce_tape_raw),
     .ce_pix   (ce_pix)
 );
 
@@ -381,6 +390,11 @@ assign ioctl_din        = 8'd0;
 
 // Reset and DIP handling
 wire reset = (RESET | status[0] | buttons[1] | ioctl_download);
+// PAUSE-LOAD-2026-06-28: pause uses a reset WITHOUT ioctl_download so it can engage DURING the cassette load too
+// (user wants the loader pausable — pause works post-load but the `| ioctl_download` above killed it during the load).
+// Safe: the SD->SDRAM write path is NOT gated by pause_cpu, so the transfer still finishes; only the CPUs/8041/
+// streamer freeze. Real resets (hard / OSD status[0] / hw button) still suppress pause.
+wire pause_reset = (RESET | status[0] | buttons[1]);
 
 // DSW-DEFAULTS-2026-06-06: DECO has BIOS-RESERVED DIP bits that MUST be set or the game
 // mis-boots. The game's FIRST init instruction is `lda $e301` (DSW2) then `eor #$ff` and it
@@ -662,6 +676,7 @@ wire cpu_we_e6xx, cpu_we_e7xx, cpu_re_e700, cpu_re_e701;
 // Control register outputs
 wire [7:0] mode_set_reg, back_h_shift_reg, back_vl_shift_reg, back_vr_shift_reg;
 wire [7:0] part_h_shift_reg, part_v_shift_reg, color_center_bot_reg;
+wire [7:0] color_missiles_reg;   // MISSILES-IMPL-2026-06-28: $E302 missile color latch
 wire [7:0] center_h_shift_space_reg, center_v_shift_reg, coin_counter_reg, nmi_reset_reg;
 
 // Main CPU memmap decoder
@@ -746,6 +761,7 @@ decocass decocass_inst (
 	.part_h_shift_reg  (part_h_shift_reg),
 	.part_v_shift_reg  (part_v_shift_reg),
 	.color_center_bot_reg (color_center_bot_reg),
+	.color_missiles_reg (color_missiles_reg),
 	.center_h_shift_space_reg (center_h_shift_space_reg),
 	.center_v_shift_reg    (center_v_shift_reg),
 	.coin_counter_reg      (coin_counter_reg),
@@ -1381,14 +1397,20 @@ video_sprites video_sprites_inst (
 );
 
 // Missiles (task 10)
+// MISSILES-DESC-SWIZZLE-FIX-2026-06-28: missile descriptors live in COLORRAM, which applies the same $C800
+// mirror-swizzle as fgvideoram (video_fg.v write_addr_eff). The mirror was fed RAW cpu_addr[9:0] → mirror-region
+// descriptor writes landed at the wrong address → garbage/off-screen missile positions → missiles invisible.
+// SAME root + fix as the sprite descriptor mirror (SPRITE-DESC-SWIZZLE-FIX). No-op for direct $C4xx writes.
+wire [9:0] mis_desc_wr_addr = cpu_addr[11] ? {cpu_addr[4:0], cpu_addr[9:5]} : cpu_addr[9:0];
 video_missiles video_missiles_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
 	.vcnt              (vcnt),
-	.color_missiles    (8'h00),
+	.color_missiles    (color_missiles_reg),   // MISSILES-IMPL-2026-06-28: was 8'h00 (stubbed)
 	.cpu_we_mis        (cpu_we_colram),
-	.cpu_mis_addr      (cpu_addr[9:0]),
+	// MISSILES-DESC-SWIZZLE-FIX-2026-06-28: was `.cpu_mis_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
+	.cpu_mis_addr      (mis_desc_wr_addr),
 	.cpu_mis_dout      (cpu_dout),
 	.mis_pen           (mis_pen),
 	.mis_priority      (mis_opaque)
@@ -1871,7 +1893,7 @@ deco_video_mixer deco_video_mixer_inst (
 	.mis_opaque             (mis_opaque),
 	.mode_set               (mode_set_reg),
 	.color_center_bot       (color_center_bot_reg),
-	.color_missiles         (8'h00),
+	.color_missiles         (color_missiles_reg),   // MISSILES-IMPL-2026-06-28: was 8'h00 (stubbed)
 	.back_h_shift           (back_h_shift_reg),
 	.back_vl_shift          (back_vl_shift_reg),
 	.back_vr_shift          (back_vr_shift_reg),
@@ -1888,17 +1910,17 @@ deco_video_mixer deco_video_mixer_inst (
 // =========================================================================
 // PAUSE + OUTPUT
 // =========================================================================
-wire        pause_cpu;
+// pause_cpu declared up at the clock-enable gating (PAUSE-2026-06-28); driven here by pause_inst.
 wire [23:0] rgb_pause;
-wire        m_pause = 1'b0;       // TODO: wire from pause button
+wire        m_pause = joystick_0[9] | joystick_1[9];   // PAUSE-2026-06-28: dedicated Pause button (conf_str J1 bit 9)
 
 pause #(8,8,8,24) pause_inst (
 	.clk_sys       (clk_sys),
-	.reset         (reset),
+	.reset         (pause_reset),   // PAUSE-LOAD-2026-06-28: excl. ioctl_download → pause works during the cassette load
 	.OSD_STATUS    (OSD_STATUS),
 	.user_button   (m_pause),
 	.pause_request (1'b0),
-	.options       (2'b00),
+	.options       (2'b01),       // PAUSE-2026-06-28: [0]=pause when OSD open; [1]=dim-video (off)
 	// DIAG-REVERT-2026-06-03: feed MCU-progress overlay (restore core_* to revert)
 	// .r             (core_r),
 	// .g             (core_g),
@@ -1940,7 +1962,13 @@ wire flip       = 1'b0;
 // screen_rotate (raster hcnt -> display vertical).
 // TUNING: if a residual shift remains after the build, nudge VID_HV_DELAY by
 // +/-1..2 (raise = push content DOWN on screen, lower = push UP).
-localparam [4:0] VID_HV_DELAY = 5'd12;   // user-measured 12 px; 1..16 (SR is 16 deep)
+// VIDEO-ALIGN-FIX-2026-06-28: was 12. The 06-06 value = 8px FG tile-defer + ~4px register chain. BUT FG-HSHIFT
+// (video_fg.v hcnt_fg=hcnt+8, added 06-11) ALREADY compensates the FG's 8px tile-defer, and the rebuilt BG is
+// per-pixel (no tile-defer at all). ⇒ the 8px was DOUBLE-COUNTED → composite over-delayed by 8 → the fixed ~8px
+// garbage band at the display top/bottom (global FG+BG; unmovable by a BG content shift; visible once BG rendered).
+// Drop to the register-chain-only ~4. (Per the tuning note: nudge +/-1..2 if a small residual remains.)
+// localparam [4:0] VID_HV_DELAY = 5'd12;   // ORIGINAL — over-counts the FG tile-defer that FG-HSHIFT already fixed
+localparam [4:0] VID_HV_DELAY = 5'd4;    // register chain only; FG tile-defer handled by FG-HSHIFT, BG is per-pixel
 
 reg [15:0] hbl_sr, vbl_sr, hs_sr, vs_sr;
 always @(posedge clk_sys) if (ce_pix) begin

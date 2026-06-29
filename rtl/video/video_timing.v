@@ -53,7 +53,19 @@ module video_timing (
     // HBLANK: high when hcnt > 255 (outside visible 0..255)
     always @(posedge clk_sys) begin
         if (ce_pix) begin
-            hblank <= (hcnt > 9'd255);
+            // VIDEO-TRIM-2026-06-28: blank the last 8 active px (hcnt 248..255) = the display-BOTTOM 8 rows
+            // (ROT270: hcnt+ = display-down). The VID_HV_DELAY phase-fix aligned the top; this trims the residual
+            // wrap-garbage band the phase shift pushed to the bottom. Was `hcnt > 9'd255` (full 256-wide active).
+            // VIDEO-WINDOW-CROP-2026-06-28: crop ONLY the bottom (low-hcnt) garbage, keep the FULL top.
+            // HW proof: `(hcnt>247)|(hcnt<8)` gave bottom-correct but top-missing-8 → so hcnt<8 fixes the bottom
+            // (KEEP) and hcnt>247 was wrongly cropping 8 good rows off the TOP (the earlier "top perfect" only
+            // looked fine because the bottom garbage drew the eye). High edge restored to the natural 255.
+            // Visible window = hcnt 8..255 (248 tall): DE narrows at the LOW edge only → screen_rotate latches the
+            // smaller hsz → bottom garbage outside the scanned frame, top intact.
+            // DIAG-REVERT-2026-06-28: prior lines below (both-ends crop, then top-only crop), uncomment to restore
+            // hblank <= (hcnt > 9'd247) | (hcnt < 9'd8);
+            // hblank <= (hcnt > 9'd247);
+            hblank <= (hcnt > 9'd263) | (hcnt < 9'd8);
         end
     end
 
