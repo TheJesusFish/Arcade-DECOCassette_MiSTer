@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Pro Soccer (Japan) (cpsoccerj) — Type 3 dongle.  Auto-generated from MAME decocass.cpp / decocass_m.cpp.
-  Shared BIOS (decocass.zip): v0b-.7e v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
+  Shared BIOS (decocass.zip): v0a-.7e (BIOS-A Japan) v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
   Cassette: dt-133_a.cas (de682a29)   Dongle: dp-133_a.dgl (919fabb2)
   Metadata $02E00 = 03 21 03  (dongle_type=0x03, game_id=0x21 = DECO release #33, swap_mode=0x03)
 -->
@@ -15,7 +15,8 @@
 
     <rom index="0" zip="decocass.zip|cpsoccer.zip|cpsoccerj.zip" md5="none">
         <!-- $00000-$00FFF Main 6502 BIOS -->
-        <part name="v0b-.7e" crc="23d929b7"/>
+        <!-- BIOS-A-FIX-2026-06-29: Japan (DECOCASS_BIOS_A_ROMS) set -> Japan BIOS v0a-.7e, not USA v0b-.7e. See Hamburger MRA for rationale. -->
+        <part name="v0a-.7e" crc="3d33ac34"/>
         <!-- $01000-$017FF Audio 6502 BIOS -->
         <part name="v1-.5a" crc="b66b2c2a"/>
         <!-- $01800-$01BFF MCU ROM -->

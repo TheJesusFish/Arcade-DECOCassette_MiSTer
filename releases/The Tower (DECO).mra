@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   The Tower (ctower) — Type 1 dongle.  Auto-generated from MAME decocass.cpp / decocass_m.cpp.
-  Shared BIOS (decocass.zip): v0b-.7e v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
+  Shared BIOS (decocass.zip): v0d-.7e (BIOS-D Europe) v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
   Cassette: ctower.cas (94ad1dd6)   Dongle: ctower.pro (32e9dcd7)
   Metadata $02E00 = 01 08 00  (dongle_type=0x01, game_id=0x08 = DECO release #8)
 -->
@@ -15,7 +15,8 @@
 
     <rom index="0" zip="decocass.zip|ctower.zip" md5="none">
         <!-- $00000-$00FFF Main 6502 BIOS -->
-        <part name="v0b-.7e" crc="23d929b7"/>
+        <!-- BIOS-D-FIX-2026-06-29: Europe (DECOCASS_BIOS_D_ROMS) set -> Europe BIOS v0d-.7e, not USA v0b-.7e. -->
+        <part name="v0d-.7e" crc="1e0c22b1"/>
         <!-- $01000-$017FF Audio 6502 BIOS -->
         <part name="v1-.5a" crc="b66b2c2a"/>
         <!-- $01800-$01BFF MCU ROM -->

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Hamburger (Japan) (chamburger) — Type 3 dongle.  Auto-generated from MAME decocass.cpp / decocass_m.cpp.
-  Shared BIOS (decocass.zip): v0b-.7e v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
+  Shared BIOS (decocass.zip): v0a-.7e (Japan, BIOS-A) v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
   Cassette: dt-126_a.cas (334fb987)   Dongle: dp-126_a.dgl (25bec0f0)
   Metadata $02E00 = 03 1A 01  (dongle_type=0x03, game_id=0x1A = DECO release #26, swap_mode=0x01)
 -->
@@ -15,7 +15,11 @@
 
     <rom index="0" zip="decocass.zip|cbtime.zip|chamburger.zip" md5="none">
         <!-- $00000-$00FFF Main 6502 BIOS -->
-        <part name="v0b-.7e" crc="23d929b7"/>
+        <!-- BIOS-A-FIX-2026-06-29: chamburger is a DECOCASS_BIOS_A_ROMS (Japan) set; it MUST run the
+             Japan BIOS v0a-.7e (contains "HDRA01HDR"), not the USA BIOS v0b-.7e ("HDRB01HDR"). The BIOS
+             matches its embedded HDR<letter> against the tape's block-0 header; HDRA tape under HDRB BIOS
+             => block 0 rejected => count frozen at 999 => Error #1. Was the long-chased "tape-read race". -->
+        <part name="v0a-.7e" crc="3d33ac34"/>
         <!-- $01000-$017FF Audio 6502 BIOS -->
         <part name="v1-.5a" crc="b66b2c2a"/>
         <!-- $01800-$01BFF MCU ROM -->

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Nebula (cnebula) — Type 1 dongle.  Auto-generated from MAME decocass.cpp / decocass_m.cpp.
-  Shared BIOS (decocass.zip): v0b-.7e v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
+  Shared BIOS (decocass.zip): v0c-.7e (BIOS-C UK) v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
   Cassette: nebula2.cas (aaac39e6)   Dongle: nebula2.pro (75cae001)
   Metadata $02E00 = 01 06 00  (dongle_type=0x01, game_id=0x06 = DECO release #6)
 -->
@@ -15,7 +15,8 @@
 
     <rom index="0" zip="decocass.zip|cnebula.zip" md5="none">
         <!-- $00000-$00FFF Main 6502 BIOS -->
-        <part name="v0b-.7e" crc="23d929b7"/>
+        <!-- BIOS-C-FIX-2026-06-29: UK (DECOCASS_BIOS_C_ROMS) set -> UK BIOS v0c-.7e, not USA v0b-.7e. -->
+        <part name="v0c-.7e" crc="9f505709"/>
         <!-- $01000-$017FF Audio 6502 BIOS -->
         <part name="v1-.5a" crc="b66b2c2a"/>
         <!-- $01800-$01BFF MCU ROM -->

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Skater (cskater) — Type 3 dongle.  Auto-generated from MAME decocass.cpp / decocass_m.cpp.
-  Shared BIOS (decocass.zip): v0b-.7e v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
+  Shared BIOS (decocass.zip): v0a-.7e (BIOS-A Japan) v1-.5a cassmcu.1c v2.3m v4.10d v3.3j.
   Cassette: dt-130_a.cas (1722e5e1)   Dongle: dp-130_a.dgl (469e80a8)
   Metadata $02E00 = 03 1E 07  (dongle_type=0x03, game_id=0x1E = DECO release #30, swap_mode=0x07)
 -->
@@ -15,7 +15,8 @@
 
     <rom index="0" zip="decocass.zip|cskater.zip" md5="none">
         <!-- $00000-$00FFF Main 6502 BIOS -->
-        <part name="v0b-.7e" crc="23d929b7"/>
+        <!-- BIOS-A-FIX-2026-06-29: Japan (DECOCASS_BIOS_A_ROMS) set -> Japan BIOS v0a-.7e, not USA v0b-.7e. See Hamburger MRA for rationale. -->
+        <part name="v0a-.7e" crc="3d33ac34"/>
         <!-- $01000-$017FF Audio 6502 BIOS -->
         <part name="v1-.5a" crc="b66b2c2a"/>
         <!-- $01800-$01BFF MCU ROM -->
