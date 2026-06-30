@@ -75,24 +75,3 @@ set_false_path -from {ascal|o_hsize* ascal|o_vsize*}
 
 set_false_path -from {mcp23009|flg_*}
 set_false_path -to   {sysmem|fpga_interfaces|clocks_resets|f2h*}
-
-# ============================================================================
-# DECO Cassette — clock-enable multicycles (TIMING-CE-2026-06-09)
-# clk_sys (96 MHz) OVERSAMPLES; the real core logic runs on slow clock enables:
-#   6502  ce_main  = 750 kHz (clk_sys/128)   audio 6502 ce_audio = 500 kHz
-#   8041  its own enable (~400 kHz)           tape_streamer ce_tape = 4.8 kHz (/20000)
-# STA was timing these CE-gated paths (incl. DEAD per-game dongle-mux logic that
-# nodong games never select) at the full 96 MHz => dozens of FALSE setup failures
-# => fitter thrash => NON-DETERMINISTIC builds (same source loads on one compile,
-# freezes@15 on the next). These tell STA the truth: paths INTO the CE-gated
-# CPUs / 8041 / tape have many clk_sys cycles to settle. SAFE — those registers
-# only ever latch on their (slow) clock enables, never every clk_sys cycle.
-# ============================================================================
-# clk_sys (96 MHz) OVERSAMPLES: the whole core (emu) runs on slow clock enables — fastest is
-# ce_pix = /16 (video), CPUs /128-/192, 8041 ~/240, tape /20000. The ONLY every-cycle logic is
-# the trivial /128 prescaler. So relax ALL intra-clk_sys paths by 4 cycles: this clears every
-# false CE-gated failure (CPUs, 8041, tape, dongle, loader BRAMs) at once, and a -setup
-# multicycle only ADDS budget so it cannot create a new failure. Framework clocks (HDMI /
-# scaler / HPS) are separate domains and are untouched.
-set_multicycle_path -setup -from [get_clocks {emu|pll|*output_counter|divclk}] -to [get_clocks {emu|pll|*output_counter|divclk}] 4
-set_multicycle_path -hold  -from [get_clocks {emu|pll|*output_counter|divclk}] -to [get_clocks {emu|pll|*output_counter|divclk}] 3
