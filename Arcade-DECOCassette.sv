@@ -409,13 +409,26 @@ wire pause_reset = (RESET | status[0] | buttons[1]);
 // See vault note "DECO Cassette BIOS-reserved DIP switches".
 reg [7:0] sw[8];
 initial begin
-	sw[0] = 8'h00; sw[1] = 8'h00; sw[2] = 8'h3F; sw[3] = 8'hFF;
+	// BIT31-FIX-2026-06-29: DSW1/DSW2 byte order swapped so Country Code (DSW2[7:5]) lands on OSD-reachable
+	// bits 21-23, not bit 31. The OSD drops bit 31, which made Country Code default to E and never reach A.
+	// Now sw[2]=DSW2, sw[3]=DSW1. The 3 module instances below feed .dsw2 from sw[2] and .dsw1 from sw[3];
+	// both MRAs use default "00,00,FF,3F" (DSW2 bits 16-23, DSW1 bits 24-31).
+	// REVERT all BIT31-FIX: defaults sw[2]=3F/sw[3]=FF; feed .dsw1 from sw[2], .dsw2 from sw[3]; MRA "00,00,3F,FF".
+	// sw[0] = 8'h00; sw[1] = 8'h00; sw[2] = 8'h3F; sw[3] = 8'hFF;   // ORIGINAL (DSW1=sw[2], DSW2=sw[3])
+	sw[0] = 8'h00; sw[1] = 8'h00; sw[2] = 8'hFF; sw[3] = 8'h3F;
 	sw[4] = 8'h00; sw[5] = 8'h00; sw[6] = 8'h00; sw[7] = 8'h00;
 end
 wire [2:0] sw_idx = ioctl_addr[2:0];
 always @(posedge clk_sys)
-	if (ioctl_wr && (ioctl_index==8'd254) && !ioctl_addr[24:3]
-	    && sw_idx != 3'd2 && sw_idx != 3'd3)   // protect hardcoded DSW1/DSW2
+	// DIAG-REVERT-2026-06-29: DIP validation (chamburger). The guard below blocked the MRA <switches>
+	// defaults from ever reaching DSW1(sw[2])/DSW2(sw[3]) — per-game DIPs couldn't load and the OSD DIP
+	// menu was inert. Ungated so Hamburger's <switches> (incl. Country Code) load + are OSD-flippable.
+	// `initial` 3F/FF defaults still protect any MRA lacking a <switches> block.
+	// REVERT: restore the guarded `if` (commented below), delete the ungated one.
+	// if (ioctl_wr && (ioctl_index==8'd254) && !ioctl_addr[24:3]
+	//     && sw_idx != 3'd2 && sw_idx != 3'd3)   // protect hardcoded DSW1/DSW2
+	// 	sw[sw_idx] <= ioctl_dout;
+	if (ioctl_wr && (ioctl_index==8'd254) && !ioctl_addr[24:3])   // DSW1/DSW2 ungated (DIP validation)
 		sw[sw_idx] <= ioctl_dout;
 
 // Extract metadata from ROM loader
@@ -719,8 +732,11 @@ decocass decocass_inst (
 	// DIPDEFAULT-FORCE-2026-06-03: the MRA <switches> default isn't auto-loading sw[2], so
 	// force "Type of Tape" = MD(Small) (DSW1 bits 5,4 = 11) -> BIOS takes the priming path
 	// without an OSD set every boot. Only MD-Small boots; revert once the MRA default is fixed.
-	.dsw1              (sw[2] | 8'h30),
-	.dsw2              (sw[3]),
+	// BIT31-FIX-2026-06-29: DSW1/DSW2 byte-swapped (Country Code off bit 31; see sw[] note above). REVERT: uncomment.
+	// .dsw1              (sw[2] | 8'h30),
+	// .dsw2              (sw[3]),
+	.dsw1              (sw[3] | 8'h30),
+	.dsw2              (sw[2]),
 	.vblank            (video_vblank),
 	// CONTROLS-FIX-2026-06-08: coin moved to joy[6] to match new CONF_STR (Coin=bit6).
 	// NOTE: coin_in feeds the MAIN-CPU NMI — the ONLY joystick line with a path to the loader.
@@ -1161,8 +1177,11 @@ inputs inputs_inst (
 	.in0              (in0),
 	.in1              (in1),
 	.in2              (in2),
-	.dsw1             (sw[2]),
-	.dsw2             (sw[3]),
+	// BIT31-FIX-2026-06-29: DSW1/DSW2 byte-swapped. REVERT: uncomment originals.
+	// .dsw1             (sw[2]),
+	// .dsw2             (sw[3]),
+	.dsw1             (sw[3]),
+	.dsw2             (sw[2]),
 	.vblank           (video_vblank),
 	.mcu_p2_low4      (mcu_p2_out[3:0]),
 	.input_q          (input_q)
@@ -1179,7 +1198,9 @@ watchdog watchdog_inst (
 	.wd_count_w       (cpu_we_e3xx && cpu_addr[0] == 1'b0),
 	.wd_flip_w        (cpu_we_e3xx && cpu_addr[0] == 1'b1),
 	.cpu_dout         (cpu_dout),
-	.dsw1             (sw[2]),
+	// BIT31-FIX-2026-06-29: DSW1 byte-swapped to sw[3]. REVERT: uncomment original.
+	// .dsw1             (sw[2]),
+	.dsw1             (sw[3]),
 	.wd_reset         (),
 	.flip_screen      ()
 );

@@ -66,6 +66,18 @@ module video_fg (
     wire [4:0] vtile = vcnt[7:3]; // tile row index (vcnt shift REVERTED — was the wrong axis)
     wire [2:0] vline = vcnt[2:0]; // scan line within 8-line char
 
+    // FG-WRAP-BLANK-2026-06-29: hcnt_fg[8]=1 means hcnt_fg passed 256, so htile=hcnt_fg[7:3] has rolled 31->0
+    // and is RE-FETCHING char columns 0/1 at the display-bottom = the mirrored tile row ("data from further up").
+    // Blank those off-map (wrapped) tiles. This MOVES NOTHING — FG/BG alignment (FG-HSHIFT +8, FG-VSHIFT +2) is
+    // untouched; it only suppresses the spurious wrapped tiles. offmap is delayed 2 ce_pix to land on char_p0
+    // (htile -> tile_code8 [+1] -> char_p0 [+1]); gating the SR-load source keeps it self-aligned to the pixel.
+    // REVERT: delete offmap_r1/r2 and restore the plain `pat_pN_sr <= char_pN;` lines in the SR load below.
+    reg offmap_r1, offmap_r2;
+    always @(posedge clk_sys) if (ce_pix) begin
+        offmap_r1 <= hcnt_fg[8];
+        offmap_r2 <= offmap_r1;
+    end
+
     // ========================================
     // Tile RAM arrays (fgvideoram, colorram, charram)
     // ========================================
@@ -156,9 +168,9 @@ module video_fg (
             // NATURAL hcnt phase (no sub-tile load shift needed).
             if (hcnt[2:0] == 3'b000) begin
                 // Load new 8-pixel char line
-                pat_p0_sr <= char_p0;
-                pat_p1_sr <= char_p1;
-                pat_p2_sr <= char_p2;
+                pat_p0_sr <= offmap_r2 ? 8'h00 : char_p0;   // FG-WRAP-BLANK-2026-06-29: blank wrapped col (was char_p0)
+                pat_p1_sr <= offmap_r2 ? 8'h00 : char_p1;   // FG-WRAP-BLANK-2026-06-29: blank wrapped col (was char_p1)
+                pat_p2_sr <= offmap_r2 ? 8'h00 : char_p2;   // FG-WRAP-BLANK-2026-06-29: blank wrapped col (was char_p2)
             end else begin
                 // Shift LEFT for next pixel (MSB-first — see FLIP-FIX above)
                 pat_p0_sr <= {pat_p0_sr[6:0], 1'b0};

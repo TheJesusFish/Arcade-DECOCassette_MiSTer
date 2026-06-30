@@ -75,5 +75,21 @@
         <part name="dp-126_b.dgl" crc="25bec0f0"/>
     </rom>
 
+    <!-- DIP format matched to the proven Kyugo MRA: NO base attr, bits-first. BIT31-FIX-2026-06-29: DSW1/DSW2
+         byte order swapped vs hardware (RTL feeds .dsw2(sw[2]), .dsw1(sw[3])); Country Code on bits 21-23, default A. -->
+    <switches default="00,00,FF,3F">
+        <!-- DSW2 (cbtime) -> switch byte 2 = bits 16-23 -->
+        <dip bits="16"       name="Lives"               ids="5,3"/>
+        <dip bits="17,18"    name="Bonus Life"          ids="50000,40000,30000,20000"/>
+        <dip bits="19"       name="Enemies"             ids="6,4"/>
+        <dip bits="20"       name="End of Level Pepper" ids="Yes,No"/>
+        <dip bits="21,23"    name="Country Code"        ids="inv,inv,F,E,D,C,B,A"/>
+        <!-- DSW1 (base decocass) -> switch byte 3 = bits 24-31 (bit 31 = VBLANK, not a DIP) -->
+        <dip bits="24,25"    name="Coin A"              ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip bits="26,27"    name="Coin B"              ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip bits="28,29"    name="Type of Tape"        ids="MT Big,inv,inv,MD Small"/>
+        <dip bits="30"       name="Cabinet"             ids="Upright,Cocktail"/>
+    </switches>
+
     <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
 </misterromdescription>

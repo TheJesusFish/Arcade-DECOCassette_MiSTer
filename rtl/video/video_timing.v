@@ -64,8 +64,8 @@ module video_timing (
             // smaller hsz → bottom garbage outside the scanned frame, top intact.
             // DIAG-REVERT-2026-06-28: prior lines below (both-ends crop, then top-only crop), uncomment to restore
             // hblank <= (hcnt > 9'd247) | (hcnt < 9'd8);
-            // hblank <= (hcnt > 9'd247);
-            hblank <= (hcnt > 9'd263) | (hcnt < 9'd8);
+            hblank <= (hcnt > 9'd257) | (hcnt < 9'd2);   // TOP-EXPAND-2026-06-29: high edge 255->257 = +2 rows at the display-TOP (high hcnt) to restore the 2 truncated BG rows / match MAME. Bottom crop (<2) unchanged. was: (hcnt>9'd255)
+            // hblank <= (hcnt > 9'd263) | (hcnt < 9'd8);
         end
     end
 

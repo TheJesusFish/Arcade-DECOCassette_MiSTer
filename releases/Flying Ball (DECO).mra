@@ -81,18 +81,17 @@
          BOOT-CRITICAL bit is DSW1 "Type of Tape" (bits 20,21, base decocass, "Used by the bios"):
          MUST be "MD (Small)"(=3,0x30) or the BIOS ($F347) skips MCU priming -> CASSETTE ERROR 59.
          The DSW2 fields below are gameplay options and do NOT affect the boot/handshake path. -->
-    <switches default="00,00,3F,FF" base="16">
-        <!-- DSW1 (base decocass) -->
-        <dip name="Coin A"       bits="16,17"    ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
-        <dip name="Coin B"       bits="18,19"    ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
-        <dip name="Type of Tape" bits="20,21"    ids="MT Big,inv,inv,MD Small"/>
-        <dip name="Cabinet"      bits="22"       ids="Upright,Cocktail"/>
-        <!-- DSW2 (cflyball PORT_MODIFY) -->
-        <dip name="Lives"        bits="24"       ids="5,3"/>
-        <dip name="Bonus Life"   bits="25,26"    ids="None,70000,50000,20000"/>
-        <dip name="Push Backs"   bits="27"       ids="3,2"/>
-        <dip name="Country Code" bits="29,30,31" ids="inv,inv,F,E,D,C,B,A"/>
-    </switches>
 
     <buttons names="Button1,Button2,Coin,Start 1P,Start 2P,Pause" default="A,B,Select,Start,R,L"/>
+    <!-- DIPs from MAME decocass.cpp (input port cflyball); Country Code bits="21,23" (inclusive range). DSW1/DSW2 byte-swapped so RTL feeds .dsw2 from sw[2], .dsw1 from sw[3]. -->
+    <switches default="00,00,FF,3F">
+        <dip bits="16" name="Lives" ids="5,3"/>
+        <dip bits="17,18" name="Bonus Life" ids="None,70000,50000,20000"/>
+        <dip bits="19" name="Push Backs" ids="3,2"/>
+        <dip bits="21,23" name="Country Code" ids="inv,inv,F,E,D,C,B,A"/>
+        <dip bits="24,25" name="Coin A" ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip bits="26,27" name="Coin B" ids="2C/1C,1C/3C,1C/2C,1C/1C"/>
+        <dip bits="28,29" name="Type of Tape" ids="MT Big,inv,inv,MD Small"/>
+        <dip bits="30" name="Cabinet" ids="Upright,Cocktail"/>
+    </switches>
 </misterromdescription>

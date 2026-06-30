@@ -44,4 +44,16 @@
     </rom>
 
     <buttons names="Button1,Button2,Coin,Start" default="A,B,Select,Start"/>
+    <!-- DIPs from MAME decocass.cpp (input port cocean1a); Country Code bits="21,23" (inclusive range). DSW1/DSW2 byte-swapped so RTL feeds .dsw2 from sw[2], .dsw1 from sw[3]. -->
+    <switches default="00,00,FF,3F">
+        <dip bits="16,17" name="Key Switch Credit" ids="1C/100C,1C/50C,1C/20C,1C/10C"/>
+        <dip bits="18" name="Game Select" ids="Center Line,1 to 8 Lines"/>
+        <dip bits="19" name="Background Music" ids="On,Off"/>
+        <dip bits="20" name="Pay Out %" ids="85%,75%"/>
+        <dip bits="21,23" name="Country Code" ids="inv,inv,F,E,D,C,B,A"/>
+        <dip bits="24,26" name="1-Coin Credits" ids="50,40,30,20,10,5,2,1"/>
+        <dip bits="27" name="SW1:4 (Don't Change)" ids="None,Off"/>
+        <dip bits="28,29" name="Type of Tape" ids="MT Big,inv,inv,MD Small"/>
+        <dip bits="30" name="Cabinet" ids="Upright,Cocktail"/>
+    </switches>
 </misterromdescription>
