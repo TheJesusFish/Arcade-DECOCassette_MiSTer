@@ -11,6 +11,7 @@
     <rbf>DECOCassette</rbf>
     <year>1981</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Shooter</category>
 
     <rom index="0" zip="decocass.zip|cnebula.zip" md5="none">

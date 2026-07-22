@@ -40,6 +40,7 @@
     <rbf>DECOCassette</rbf>
     <year>1985</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Action</category>
 
     <rom index="0" zip="decocass.zip|cflyball.zip" md5="none">

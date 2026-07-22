@@ -11,6 +11,7 @@
     <rbf>DECOCassette</rbf>
     <year>1983</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Action</category>
 
     <rom index="0" zip="decocass.zip|clapapa.zip|clapapa2.zip" md5="none">

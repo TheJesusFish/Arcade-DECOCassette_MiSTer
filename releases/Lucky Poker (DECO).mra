@@ -11,6 +11,7 @@
     <rbf>DECOCassette</rbf>
     <year>1981</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Casino</category>
 
     <rom index="0" zip="decocass.zip|cluckypo.zip" md5="none">

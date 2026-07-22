@@ -24,6 +24,7 @@
     <rbf>DECOCassette</rbf>
     <year>1985</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Maze</category>
 
     <rom index="0" zip="decocass.zip|cbdash.zip" md5="none">

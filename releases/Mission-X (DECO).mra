@@ -25,6 +25,7 @@
     <rbf>DECOCassette</rbf>
     <year>1982</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Shooter</category>
 
     <rom index="0" zip="decocass.zip|cmissnx.zip" md5="none">

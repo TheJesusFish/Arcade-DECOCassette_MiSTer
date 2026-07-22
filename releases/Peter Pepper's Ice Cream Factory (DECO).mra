@@ -11,6 +11,7 @@
     <rbf>DECOCassette</rbf>
     <year>1984</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Platformer</category>
 
     <rom index="0" zip="decocass.zip|cppicf.zip" md5="none">

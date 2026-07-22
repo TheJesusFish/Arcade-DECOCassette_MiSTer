@@ -11,6 +11,7 @@
     <rbf>DECOCassette</rbf>
     <year>1983</year>
     <manufacturer>Data East</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Sports</category>
 
     <rom index="0" zip="decocass.zip|cpsoccer.zip" md5="none">

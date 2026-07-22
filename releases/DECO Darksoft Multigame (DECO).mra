@@ -38,6 +38,7 @@
     <rbf>DECOCassette</rbf>
     <year>2022</year>
     <manufacturer>bootleg (Darksoft)</manufacturer>
+    <rotation>vertical (CCW)</rotation>
     <category>Multigame</category>
 
     <rom index="0" zip="decocass.zip|decodark.zip" md5="none">
